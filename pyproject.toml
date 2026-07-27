@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "x402-validator"
-version = "0.3.0"
+version = "0.3.1"
 description = "x402 strict-v2 conformance engine: CLI, MCP server, batch auditor"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -30,8 +30,8 @@ dependencies = [
 ]
 
 [project.urls]
-homepage = "https://github.com/smartflowproai-lang/x402-endpoint-validator"
-repository = "https://github.com/smartflowproai-lang/x402-endpoint-validator"
+homepage = "https://github.com/MSSATANASS/x402-conformance-engine"
+repository = "https://github.com/MSSATANASS/x402-conformance-engine"
 
 [project.scripts]
 x402-validate = "x402_validator.cli:main"

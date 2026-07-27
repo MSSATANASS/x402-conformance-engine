@@ -4,6 +4,32 @@ All notable changes to x402-validator are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com). This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-07-27
+
+### Fixed
+
+- `check_bazaar` validated `extensions.bazaar` against an assumed shape
+  (`method == "POST"`, `serviceName`, `tags`) that does not match any real
+  x402 capture. Corrected against the four production captures that
+  actually carry the block — all agree on
+  `info.input.type`/`info.input.method`/`info.output.type`/`schema`.
+  The block is also now correctly treated as OPTIONAL (absence is PASS,
+  not FAIL). The previous check would FAIL every real Bazaar-conformant
+  merchant tested (AsterPay, Viridis) on this specific check; confirmed
+  live on the deployed API before this fix shipped.
+- `project.urls` in `pyproject.toml` pointed at
+  `smartflowproai-lang/x402-endpoint-validator` (the upstream repo this
+  package forked from) instead of this package's own repository. Fixed to
+  point at `MSSATANASS/x402-conformance-engine`.
+
+### Project
+
+- Same bazaar-check correction submitted upstream as
+  `smartflowproai-lang/x402-endpoint-validator#16`, built independently
+  against the same four production captures, scoped to just the check +
+  tests + two negative fixtures (no package/CLI/MCP — per upstream
+  maintainer's review on PR #9).
+
 ## [Unreleased]
 
 ### Quality refactor
