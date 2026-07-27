@@ -1,6 +1,7 @@
 {
-  "description": "HTTP exchange real capturado en Viridis (sanitizado). Tokens, wallets y datos sensibles reemplazados.",
-  "original_source": "Captura de Tom — Viridis environment, 2026-07-24",
+  "description": "Constructed (synthetic) 402 exchange for a CoinMarketCap-style x402 proxy on Solana. NOT a real capture. Corrected 2026-07-27 per upstream maintainer review (github.com/smartflowproai-lang/x402-endpoint-validator PR #9): this file previously claimed to be Tom's real Viridis capture from 2026-07-24, but the request targets pro-api.coinmarketcap.com, not any Viridis endpoint, and does not match either real Viridis fixture (viridis_regulatory_radar.json, viridis_ghg_ledger.json, both eip155:8453/USDC). The attribution was wrong; this fixture is a constructed example exercising a Solana-network payment challenge, and is labeled as such.",
+  "constructed": true,
+  "original_source": null,
   "request": {
     "method": "GET",
     "url": "https://pro-api.coinmarketcap.com/x402/v3/cryptocurrency/listings/latest",
