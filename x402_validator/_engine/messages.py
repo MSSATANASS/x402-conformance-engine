@@ -125,37 +125,36 @@ def json_not_applicable(status: int) -> str:
     )
 
 
-# === Bazaar ==============================================================
+# === Bazaar ===============================================================
+#
+# Shape verified against every production capture that carries the block:
+# viridis_regulatory_radar, viridis_ghg_ledger, asterpay_crypto_prices,
+# asterpay_sentiment (all four agree byte-for-byte). It is an OPTIONAL
+# marketplace-discovery extension, not part of the core PaymentRequired
+# contract, so its absence is conformant.
 
 
-def bazaar_missing_block() -> str:
+def bazaar_not_present() -> str:
     return (
-        "extensions.bazaar block is required but missing from the HTTP 402 "
-        "response body. Fix: include 'extensions.bazaar' at the top level "
-        "of the body with three fields: 'method' (must be 'POST'), "
-        "'serviceName' (string), 'tags' (non-empty array of strings)."
+        "extensions.bazaar is not present. This is an optional marketplace-"
+        "discovery extension, not required by the core x402 spec — PASS "
+        "(not applicable)."
     )
 
 
-def bazaar_missing_fields(missing: Iterable[str]) -> str:
-    items = ", ".join(missing)
+def bazaar_malformed(missing: Iterable[str]) -> str:
+    items = "; ".join(missing)
     return (
-        f"extensions.bazaar is present but missing required field(s): "
-        f"{items}. Fix: add the listed fields; 'method' must equal 'POST', "
-        f"'serviceName' must be a non-empty string, 'tags' must be a "
-        f"non-empty array of strings."
-    )
-
-
-def bazaar_wrong_method(actual: str) -> str:
-    return (
-        f"extensions.bazaar.method is '{actual}' but the x402 spec requires "
-        f"'POST'. Fix: set method: 'POST'."
+        f"extensions.bazaar is present but malformed: {items}. Fix: the "
+        f"observed production shape is extensions.bazaar.info.input.type, "
+        f"extensions.bazaar.info.input.method, "
+        f"extensions.bazaar.info.output.type, and (recommended) "
+        f"extensions.bazaar.schema as a JSON Schema object."
     )
 
 
 def bazaar_ok() -> str:
-    return "extensions.bazaar is present and validates (method=POST, serviceName set, tags non-empty)."
+    return "extensions.bazaar is present and matches the observed production shape (info.input/output, schema)."
 
 
 def bazaar_skipped() -> str:

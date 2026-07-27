@@ -36,9 +36,8 @@ from x402_validator._engine import (
 )
 from x402_validator._engine import checks as engine_checks
 from x402_validator._engine.messages import (
-    bazaar_missing_block,
-    bazaar_missing_fields,
-    bazaar_wrong_method,
+    bazaar_malformed,
+    bazaar_not_present,
 )
 
 
@@ -524,14 +523,45 @@ class TestCheckJsonResilience:
 
 
 class TestCheckBazaar:
+    """Shape verified against every production capture that carries the
+    block (Viridis regulatory-radar, Viridis ghg-ledger, AsterPay
+    crypto-prices, AsterPay sentiment) — see upstream PR #16
+    (smartflowproai-lang/x402-endpoint-validator) for the full derivation.
+    The block is OPTIONAL: absence is conformant (PASS)."""
 
     def test_pass_full(self) -> None:
-        body = {"extensions": {"bazaar": {"method": "POST", "serviceName": "My API", "tags": ["weather"]}}}
+        body = {
+            "extensions": {
+                "bazaar": {
+                    "info": {
+                        "input": {"type": "http", "method": "POST"},
+                        "output": {"type": "json", "example": {"ok": True}},
+                    },
+                    "schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"},
+                }
+            }
+        }
         result = engine_checks.check_bazaar(body)
         assert isinstance(result, BazaarResult)
         assert result.status == "PASS"
-        assert "validates" in result.message
+        assert "matches the observed production shape" in result.message
         assert result.details["missing_fields"] == []
+        assert result.details["bazaar_present"] is True
+
+    def test_pass_full_without_schema(self) -> None:
+        """schema is recommended but not strictly required by any capture check."""
+        body = {
+            "extensions": {
+                "bazaar": {
+                    "info": {
+                        "input": {"type": "http", "method": "GET"},
+                        "output": {"type": "json", "example": {}},
+                    }
+                }
+            }
+        }
+        result = engine_checks.check_bazaar(body)
+        assert result.status == "PASS"
 
     def test_pass_no_body(self) -> None:
         """No 402 body → bazaar check skipped, treated as PASS."""
@@ -539,70 +569,155 @@ class TestCheckBazaar:
         assert result.status == "PASS"
         assert "skipped" in result.message
 
-    def test_fail_missing_bazaar_block(self) -> None:
+    def test_pass_missing_bazaar_block(self) -> None:
+        """Block is optional — absence is conformant, not a failure."""
         result = engine_checks.check_bazaar({"extensions": {}})
-        assert result.status == "FAIL"
-        assert bazaar_missing_block().split(".")[1].strip() in result.message or "extensions.bazaar block is required" in result.message
-        assert result.details["missing_fields"] == ["extensions.bazaar"]
+        assert result.status == "PASS"
+        assert bazaar_not_present() == result.message
+        assert result.details["bazaar_present"] is False
 
-    def test_fail_no_extensions_at_all(self) -> None:
+    def test_pass_no_extensions_at_all(self) -> None:
         result = engine_checks.check_bazaar({"x402Version": 2, "accepts": []})
-        assert result.status == "FAIL"
-        assert result.details["missing_fields"] == ["extensions.bazaar"]
+        assert result.status == "PASS"
+        assert result.details["bazaar_present"] is False
 
-    def test_fail_non_dict_body(self) -> None:
+    def test_pass_non_dict_body(self) -> None:
+        """Non-dict body: nothing to validate, treated as absent (PASS)."""
         result = engine_checks.check_bazaar("not a dict")
-        assert result.status == "FAIL"
+        assert result.status == "PASS"
+        assert result.details["bazaar_present"] is False
 
-    def test_fail_wrong_method(self) -> None:
-        body = {"extensions": {"bazaar": {"method": "GET", "serviceName": "x", "tags": ["t"]}}}
+    def test_fail_bazaar_not_an_object(self) -> None:
+        body = {"extensions": {"bazaar": "not-an-object"}}
         result = engine_checks.check_bazaar(body)
         assert result.status == "FAIL"
-        assert "POST" in result.message
-        assert bazaar_wrong_method("GET").split(".")[1].strip() in result.message or "POST" in result.message
+        assert result.details["bazaar_present"] is True
 
-    def test_fail_missing_method(self) -> None:
-        body = {"extensions": {"bazaar": {"serviceName": "x", "tags": ["t"]}}}
+    def test_fail_missing_info(self) -> None:
+        body = {"extensions": {"bazaar": {"schema": {"type": "object"}}}}
         result = engine_checks.check_bazaar(body)
         assert result.status == "FAIL"
-        assert "extensions.bazaar.method" in result.details["missing_fields"]
+        assert any("info" in m for m in result.details["missing_fields"])
 
-    def test_fail_empty_service_name(self) -> None:
-        body = {"extensions": {"bazaar": {"method": "POST", "serviceName": "   ", "tags": ["t"]}}}
+    def test_fail_missing_input_method(self) -> None:
+        body = {
+            "extensions": {
+                "bazaar": {
+                    "info": {
+                        "input": {"type": "http"},
+                        "output": {"type": "json", "example": {}},
+                    }
+                }
+            }
+        }
         result = engine_checks.check_bazaar(body)
         assert result.status == "FAIL"
-        assert "extensions.bazaar.serviceName" in result.details["missing_fields"]
+        assert any("info.input.method" in m for m in result.details["missing_fields"])
 
-    def test_fail_non_string_service_name(self) -> None:
-        body = {"extensions": {"bazaar": {"method": "POST", "serviceName": 42, "tags": ["t"]}}}
+    def test_fail_missing_input_type(self) -> None:
+        body = {
+            "extensions": {
+                "bazaar": {
+                    "info": {
+                        "input": {"method": "GET"},
+                        "output": {"type": "json", "example": {}},
+                    }
+                }
+            }
+        }
         result = engine_checks.check_bazaar(body)
         assert result.status == "FAIL"
+        assert any("info.input.type" in m for m in result.details["missing_fields"])
 
-    def test_fail_missing_tags(self) -> None:
-        body = {"extensions": {"bazaar": {"method": "POST", "serviceName": "x"}}}
+    def test_fail_missing_output_type(self) -> None:
+        body = {
+            "extensions": {
+                "bazaar": {
+                    "info": {
+                        "input": {"type": "http", "method": "GET"},
+                        "output": {"example": {}},
+                    }
+                }
+            }
+        }
         result = engine_checks.check_bazaar(body)
         assert result.status == "FAIL"
-        assert "extensions.bazaar.tags" in result.details["missing_fields"]
+        assert any("info.output.type" in m for m in result.details["missing_fields"])
 
-    def test_fail_empty_tags_list(self) -> None:
-        body = {"extensions": {"bazaar": {"method": "POST", "serviceName": "x", "tags": []}}}
+    def test_fail_missing_output(self) -> None:
+        body = {
+            "extensions": {
+                "bazaar": {
+                    "info": {
+                        "input": {"type": "http", "method": "GET"},
+                    }
+                }
+            }
+        }
         result = engine_checks.check_bazaar(body)
         assert result.status == "FAIL"
-        assert "extensions.bazaar.tags" in result.details["missing_fields"]
+        assert any("info.output" in m for m in result.details["missing_fields"])
 
-    def test_fail_non_list_tags(self) -> None:
-        body = {"extensions": {"bazaar": {"method": "POST", "serviceName": "x", "tags": "weather"}}}
+    def test_fail_schema_not_an_object(self) -> None:
+        body = {
+            "extensions": {
+                "bazaar": {
+                    "info": {
+                        "input": {"type": "http", "method": "GET"},
+                        "output": {"type": "json", "example": {}},
+                    },
+                    "schema": "not-an-object",
+                }
+            }
+        }
         result = engine_checks.check_bazaar(body)
         assert result.status == "FAIL"
+        assert any("schema" in m for m in result.details["missing_fields"])
 
     def test_fail_multiple_missing_fields(self) -> None:
-        body = {"extensions": {"bazaar": {}}}
+        body = {"extensions": {"bazaar": {"info": {}}}}
         result = engine_checks.check_bazaar(body)
         assert result.status == "FAIL"
         missing = result.details["missing_fields"]
-        assert "extensions.bazaar.method" in missing
-        assert "extensions.bazaar.serviceName" in missing
-        assert "extensions.bazaar.tags" in missing
+        assert any("info.input" in m for m in missing)
+        assert any("info.output" in m for m in missing)
+
+    def test_pass_real_viridis_regulatory_radar_shape(self) -> None:
+        """Regression guard against the real Viridis capture shape."""
+        body = {
+            "extensions": {
+                "bazaar": {
+                    "info": {
+                        "input": {
+                            "body": {"jurisdiction": "US", "query": "x", "sector": "energy"},
+                            "bodyType": "json",
+                            "method": "POST",
+                            "type": "http",
+                        },
+                        "output": {"example": {"status": "success"}, "type": "json"},
+                    },
+                    "schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"},
+                }
+            }
+        }
+        result = engine_checks.check_bazaar(body)
+        assert result.status == "PASS"
+
+    def test_pass_real_asterpay_shape(self) -> None:
+        """Regression guard against the real AsterPay capture shape."""
+        body = {
+            "extensions": {
+                "bazaar": {
+                    "info": {
+                        "input": {"type": "http", "method": "GET", "queryParams": {"symbols": "BTC"}},
+                        "output": {"type": "json", "example": {"BTC": {"price": 1}}},
+                    },
+                    "schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"},
+                }
+            }
+        }
+        result = engine_checks.check_bazaar(body)
+        assert result.status == "PASS"
 
 
 # ---------------------------------------------------------------------------
@@ -614,15 +729,33 @@ class TestCheckBazaarForUrl:
 
     @pytest.mark.asyncio
     async def test_pass_full(self, make_client) -> None:
-        body = {"extensions": {"bazaar": {"method": "POST", "serviceName": "x", "tags": ["t"]}}}
+        body = {
+            "extensions": {
+                "bazaar": {
+                    "info": {
+                        "input": {"type": "http", "method": "POST"},
+                        "output": {"type": "json", "example": {}},
+                    }
+                }
+            }
+        }
         handler = lambda req: _json_response(402, body)
         async with make_client(handler) as client:
             result = await engine_checks.check_bazaar_for_url(client, "https://api.example.com")
         assert result.status == "PASS"
 
     @pytest.mark.asyncio
-    async def test_fail_missing(self, make_client) -> None:
+    async def test_pass_absent_block_is_optional(self, make_client) -> None:
+        """Block is optional — absence is conformant, not a failure."""
         handler = lambda req: _json_response(402, {"x402Version": 2, "accepts": []})
+        async with make_client(handler) as client:
+            result = await engine_checks.check_bazaar_for_url(client, "https://api.example.com")
+        assert result.status == "PASS"
+
+    @pytest.mark.asyncio
+    async def test_fail_present_but_malformed(self, make_client) -> None:
+        body = {"extensions": {"bazaar": {"info": {}}}}
+        handler = lambda req: _json_response(402, body)
         async with make_client(handler) as client:
             result = await engine_checks.check_bazaar_for_url(client, "https://api.example.com")
         assert result.status == "FAIL"
@@ -932,9 +1065,10 @@ class TestX402Auditor:
         valid Payment-Required header, and 402 body is JSON + bazaar."""
 
         bazaar = {
-            "method": "POST",
-            "serviceName": "My API",
-            "tags": ["weather"],
+            "info": {
+                "input": {"type": "http", "method": "POST"},
+                "output": {"type": "json", "example": {"temp_f": 72}},
+            },
         }
         payment = {
             "network": "eip155:8453",
@@ -1042,7 +1176,7 @@ class TestX402Auditor:
     async def test_marketplace_mode_per_product_bazaar_pass(self, make_client) -> None:
         """When a paid product returns 402 + bazaar, a per-product bazaar check is added."""
         product = _valid_product("paid_x")
-        bazaar = {"method": "POST", "serviceName": "x", "tags": ["t"]}
+        bazaar = {"info": {"input": {"type": "http", "method": "POST"}, "output": {"type": "json", "example": {}}}}
         payment = {
             "network": "eip155:8453",
             "x402Version": 2,
@@ -1146,7 +1280,7 @@ class TestX402Auditor:
                 return _payload_response({"products": [product]})
             if url.endswith("/") and "/a" not in url.rstrip("/")[:-1]:
                 return _b64_obj({"network": "eip155:8453", "x402Version": 2,
-                                "accepts": [], "extensions": {"bazaar": {"method": "POST", "serviceName": "x", "tags": ["t"]}}})
+                                "accepts": [], "extensions": {"bazaar": {"info": {"input": {"type": "http", "method": "POST"}, "output": {"type": "json", "example": {}}}}}})
             if "/a" in url:
                 # 402 with valid Payment-Required header BUT body that fails to parse
                 return httpx.Response(402, content=b"<broken",
@@ -1171,7 +1305,7 @@ class TestX402Auditor:
                 return _payload_response({"products": [product]})
             if url.endswith("/") and "/a" not in url.rstrip("/")[:-1]:
                 return _b64_obj({"network": "eip155:8453", "x402Version": 2,
-                                "accepts": [], "extensions": {"bazaar": {"method": "POST", "serviceName": "x", "tags": ["t"]}}})
+                                "accepts": [], "extensions": {"bazaar": {"info": {"input": {"type": "http", "method": "POST"}, "output": {"type": "json", "example": {}}}}}})
             if "/a" in url:
                 # 402 with valid header BUT body is JSON primitive, not dict
                 return httpx.Response(402, content=b'"just a string"',
@@ -1196,7 +1330,7 @@ class TestX402Auditor:
                 return _payload_response({"products": [product]})
             if url.endswith("/") and "/a" not in url.rstrip("/")[:-1]:
                 return _b64_obj({"network": "eip155:8453", "x402Version": 2,
-                                "accepts": [], "extensions": {"bazaar": {"method": "POST", "serviceName": "x", "tags": ["t"]}}})
+                                "accepts": [], "extensions": {"bazaar": {"info": {"input": {"type": "http", "method": "POST"}, "output": {"type": "json", "example": {}}}}}})
             if "/a" in url:
                 return httpx.Response(402, content=b"not json {{",
                                       request=req,
@@ -1219,7 +1353,7 @@ class TestX402Auditor:
                 return _payload_response({"products": [product]})
             if url == "https://api.example.com/":
                 return _b64_obj({"network": "eip155:8453", "x402Version": 2,
-                                "accepts": [], "extensions": {"bazaar": {"method": "POST", "serviceName": "x", "tags": ["t"]}}})
+                                "accepts": [], "extensions": {"bazaar": {"info": {"input": {"type": "http", "method": "POST"}, "output": {"type": "json", "example": {}}}}}})
             if url == "https://api.example.com/x/a":
                 # Without trailing slash — check_product_endpoint probes
                 return httpx.Response(402, content=b"",
@@ -1253,7 +1387,7 @@ class TestRunAudit:
             "network": "eip155:8453",
             "accepts": [],
             "x402Version": 2,
-            "extensions": {"bazaar": {"method": "POST", "serviceName": "x", "tags": ["t"]}},
+            "extensions": {"bazaar": {"info": {"input": {"type": "http", "method": "POST"}, "output": {"type": "json", "example": {}}}}},
         }
         def handler(req: httpx.Request) -> httpx.Response:
             url = str(req.url)

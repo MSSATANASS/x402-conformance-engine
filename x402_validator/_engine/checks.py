@@ -379,16 +379,25 @@ async def check_json_resilience(
 
 
 def check_bazaar(response_body: dict[str, Any] | None) -> BazaarResult:
-    """Validate ``extensions.bazaar`` block shape on a 402 body.
+    """Validate the optional ``extensions.bazaar`` marketplace-discovery block.
 
-    PASS — required fields present and valid.
-    FAIL — block missing or any required field missing/invalid.
-    SKIP — body is None (returns PASS with skipped message).
+    Shape verified against every production capture that carries the block
+    (Viridis regulatory-radar, Viridis ghg-ledger, AsterPay crypto-prices,
+    AsterPay sentiment — all four agree byte-for-byte):
 
-    Required fields:
-        extensions.bazaar.method      — must equal ``"POST"``
-        extensions.bazaar.serviceName — non-empty string
-        extensions.bazaar.tags        — non-empty list of strings
+        extensions.bazaar.info.input.type    == "http"
+        extensions.bazaar.info.input.method  (e.g. "GET" / "POST")
+        extensions.bazaar.info.output.type   (e.g. "json")
+        extensions.bazaar.schema             (JSON Schema object, when present)
+
+    The block is OPTIONAL — it is a marketplace-discovery extension, not
+    part of the core x402 PaymentRequired contract. Its absence is
+    conformant (PASS). Present-but-malformed shapes FAIL.
+
+    PASS — block absent, OR present and matches the shape above.
+    FAIL — block present but missing/invalid info.input.method,
+           info.output, or (when present) schema is not an object.
+    SKIP — no 402 body available (returns PASS, not applicable).
     """
     if response_body is None:
         return BazaarResult(
@@ -396,23 +405,17 @@ def check_bazaar(response_body: dict[str, Any] | None) -> BazaarResult:
             message=msg.bazaar_skipped(),
             details={
                 "bazaar_present": False,
-                "bazaar_method": None,
-                "bazaar_service_name": None,
-                "bazaar_tags": None,
                 "missing_fields": [],
             },
         )
 
     if not isinstance(response_body, dict):
         return BazaarResult(
-            status="FAIL",
-            message=msg.bazaar_missing_block(),
+            status="PASS",
+            message=msg.bazaar_not_present(),
             details={
                 "bazaar_present": False,
-                "bazaar_method": None,
-                "bazaar_service_name": None,
-                "bazaar_tags": None,
-                "missing_fields": ["extensions.bazaar"],
+                "missing_fields": [],
             },
         )
 
@@ -421,52 +424,56 @@ def check_bazaar(response_body: dict[str, Any] | None) -> BazaarResult:
 
     if bazaar is None:
         return BazaarResult(
-            status="FAIL",
-            message=msg.bazaar_missing_block(),
+            status="PASS",
+            message=msg.bazaar_not_present(),
             details={
                 "bazaar_present": False,
-                "bazaar_method": None,
-                "bazaar_service_name": None,
-                "bazaar_tags": None,
-                "missing_fields": ["extensions.bazaar"],
-            },
-        )
-
-    bazaar_method = bazaar.get("method")
-    bazaar_service_name = bazaar.get("serviceName")
-    bazaar_tags = bazaar.get("tags")
-    missing: list[str] = []
-
-    if bazaar_method is None:
-        missing.append("extensions.bazaar.method")
-    elif bazaar_method != "POST":
-        return BazaarResult(
-            status="FAIL",
-            message=msg.bazaar_wrong_method(str(bazaar_method)),
-            details={
-                "bazaar_present": True,
-                "bazaar_method": bazaar_method,
-                "bazaar_service_name": bazaar_service_name,
-                "bazaar_tags": bazaar_tags,
                 "missing_fields": [],
             },
         )
 
-    if not isinstance(bazaar_service_name, str) or bazaar_service_name.strip() == "":
-        missing.append("extensions.bazaar.serviceName")
+    if not isinstance(bazaar, dict):
+        return BazaarResult(
+            status="FAIL",
+            message=msg.bazaar_malformed(["extensions.bazaar is present but not an object"]),
+            details={
+                "bazaar_present": True,
+                "missing_fields": ["extensions.bazaar (not an object)"],
+            },
+        )
 
-    if not isinstance(bazaar_tags, list) or len(bazaar_tags) == 0:
-        missing.append("extensions.bazaar.tags")
+    missing: list[str] = []
+    info = bazaar.get("info")
+
+    if not isinstance(info, dict):
+        missing.append("extensions.bazaar.info missing or not an object")
+    else:
+        input_block = info.get("input")
+        if not isinstance(input_block, dict):
+            missing.append("extensions.bazaar.info.input missing or not an object")
+        else:
+            if not input_block.get("type"):
+                missing.append("extensions.bazaar.info.input.type missing")
+            if not input_block.get("method"):
+                missing.append("extensions.bazaar.info.input.method missing")
+
+        output_block = info.get("output")
+        if not isinstance(output_block, dict):
+            missing.append("extensions.bazaar.info.output missing or not an object")
+        else:
+            if not output_block.get("type"):
+                missing.append("extensions.bazaar.info.output.type missing")
+
+    schema = bazaar.get("schema")
+    if schema is not None and not isinstance(schema, dict):
+        missing.append("extensions.bazaar.schema present but not an object")
 
     if missing:
         return BazaarResult(
             status="FAIL",
-            message=msg.bazaar_missing_fields(missing),
+            message=msg.bazaar_malformed(missing),
             details={
                 "bazaar_present": True,
-                "bazaar_method": bazaar_method,
-                "bazaar_service_name": bazaar_service_name,
-                "bazaar_tags": bazaar_tags,
                 "missing_fields": missing,
             },
         )
@@ -476,9 +483,6 @@ def check_bazaar(response_body: dict[str, Any] | None) -> BazaarResult:
         message=msg.bazaar_ok(),
         details={
             "bazaar_present": True,
-            "bazaar_method": bazaar_method,
-            "bazaar_service_name": bazaar_service_name,
-            "bazaar_tags": bazaar_tags,
             "missing_fields": [],
         },
     )
