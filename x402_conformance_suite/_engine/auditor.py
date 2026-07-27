@@ -29,6 +29,8 @@ from typing import Any, Final, Literal
 import httpx
 
 from x402_conformance_suite._engine.checks import (
+    _b64_to_obj,
+    _network_candidates,
     check_bazaar,
     check_bazaar_for_url,
     check_caip2,
@@ -55,6 +57,23 @@ _STATUS_PRIORITY: Final[dict[str, int]] = {
     "FAIL": 2,
     "CRITICAL_FAIL": 3,
 }
+
+
+def _networks_from_headers(headers: dict[str, Any]) -> list[str]:
+    """Extract network candidates from a product endpoint's response headers.
+
+    Reads the ``payment-required`` / ``x-payment-required`` base64(JSON)
+    payload and returns every network candidate (top-level and
+    ``accepts[].network``) so the marketplace fallback can validate them.
+    """
+    lowered = {str(k).lower(): str(v) for k, v in headers.items()}
+    raw = lowered.get("payment-required") or lowered.get("x-payment-required")
+    if not raw:
+        return []
+    obj = _b64_to_obj(raw)
+    if obj is None:
+        return []
+    return _network_candidates(obj)
 
 
 class X402Auditor:
@@ -194,11 +213,20 @@ class X402Auditor:
         if not isinstance(products, list):
             return
 
+        product_networks: list[str] = []
+
         for product in products:
             if not isinstance(product, dict):
                 continue
             pr = await check_product_endpoint(self._client, target_url, product)
             checks.append(pr)
+
+            # Capture CAIP-2 candidates from the product's own 402 payload so
+            # a free-discovery root (HTTP 200) does not mask valid networks.
+            if isinstance(pr.details, dict):
+                headers = pr.details.get("headers")
+                if isinstance(headers, dict):
+                    product_networks.extend(_networks_from_headers(headers))
 
             # Per paid product: also probe bazaar on the endpoint itself.
             if pr.status == "PASS" and product.get("x402"):
@@ -209,6 +237,34 @@ class X402Auditor:
                     bz = check_bazaar(body)
                     bz.check_name = f"bazaar_{product.get('id', 'unknown')}"
                     checks.append(bz)
+
+        # Marketplace fallback: root CAIP-2 probe found no payment header
+        # (typical when the catalog page is intentionally a free 200), but a
+        # paid product's 402 PaymentRequired declared a valid network. The
+        # product-derived result supersedes the root "header missing" FAIL —
+        # update that result in place so the aggregate verdict reflects the
+        # networks the products actually enforce.
+        if product_networks:
+            for check in checks:
+                if (
+                    isinstance(check, Caip2Result)
+                    and check.details.get("header_present") is False
+                ):
+                    for network_str in product_networks:
+                        if CAIP2_PATTERN.match(network_str):
+                            check.status = "PASS"
+                            check.message = (
+                                "CAIP-2 network from product 402 "
+                                f"PaymentRequired: {network_str}"
+                            )
+                            check.details = {
+                                "header_present": True,
+                                "header_name": "product.payment-required",
+                                "caip2_value": network_str,
+                                "valid": True,
+                            }
+                            break
+                    break
 
         # If manifest declares a top-level network, also check it
         manifest_network = manifest_payload.get("network")

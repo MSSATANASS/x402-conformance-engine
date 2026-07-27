@@ -83,6 +83,26 @@ def _b64_to_obj(token: str) -> dict[str, Any] | None:
         return None
 
 
+def _network_candidates(obj: dict[str, Any]) -> list[str]:
+    """Collect network identifier candidates from a decoded payment payload.
+
+    x402 v2 PaymentRequired carries the network per payment option at
+    ``accepts[].network`` (e.g. ``eip155:8453``); legacy/v1 shapes put it at
+    top level (``network`` or ``chainId``). Both are returned, top-level
+    first, so the caller can accept the first CAIP-2 match.
+    """
+    candidates: list[str] = []
+    top_level = obj.get("network") or obj.get("chainId")
+    if top_level:
+        candidates.append(str(top_level))
+    accepts = obj.get("accepts")
+    if isinstance(accepts, list):
+        for entry in accepts:
+            if isinstance(entry, dict) and entry.get("network"):
+                candidates.append(str(entry["network"]))
+    return candidates
+
+
 # ---------------------------------------------------------------------------
 # Manifest discovery
 # ---------------------------------------------------------------------------
@@ -242,35 +262,33 @@ async def check_caip2(
         if obj is None:
             continue
 
-        network = obj.get("network") or obj.get("chainId")
-        if not network:
+        candidates = _network_candidates(obj)
+        if not candidates:
             continue
 
-        network_str = str(network)
-        if CAIP2_PATTERN.match(network_str):
-            display = _header_display_name(header_name)
-            return Caip2Result(
-                status="PASS",
-                message=msg.caip2_ok(display, network_str),
-                details={
-                    "header_present": True,
-                    "header_name": display,
-                    "caip2_value": network_str,
-                    "valid": True,
-                },
-            )
-        else:
-            display = _header_display_name(header_name)
-            return Caip2Result(
-                status="FAIL",
-                message=msg.caip2_invalid(display, network_str),
-                details={
-                    "header_present": True,
-                    "header_name": display,
-                    "caip2_value": network_str,
-                    "valid": False,
-                },
-            )
+        display = _header_display_name(header_name)
+        for network_str in candidates:
+            if CAIP2_PATTERN.match(network_str):
+                return Caip2Result(
+                    status="PASS",
+                    message=msg.caip2_ok(display, network_str),
+                    details={
+                        "header_present": True,
+                        "header_name": display,
+                        "caip2_value": network_str,
+                        "valid": True,
+                    },
+                )
+        return Caip2Result(
+            status="FAIL",
+            message=msg.caip2_invalid(display, candidates[0]),
+            details={
+                "header_present": True,
+                "header_name": display,
+                "caip2_value": candidates[0],
+                "valid": False,
+            },
+        )
 
     return Caip2Result(
         status="FAIL",

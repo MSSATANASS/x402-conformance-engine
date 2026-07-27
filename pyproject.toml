@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "x402-conformance-suite"
-version = "0.4.0"
+version = "0.4.1"
 description = "x402 strict-v2 conformance engine: CLI, MCP server, batch auditor"
 readme = "README.md"
 license = {text = "Apache-2.0"}

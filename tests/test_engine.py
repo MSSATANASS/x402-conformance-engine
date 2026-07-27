@@ -342,6 +342,93 @@ class TestCheckCaip2:
         assert "No CAIP-2 network identifier" in result.message
 
     @pytest.mark.asyncio
+    async def test_pass_v2_accepts_network(self, make_client) -> None:
+        """x402 v2 PaymentRequired carries the network at accepts[].network,
+        not top level. Regression: parser used to miss this and FAIL valid
+        v2 endpoints."""
+        payload = {
+            "x402Version": 2,
+            "error": "payment required",
+            "accepts": [
+                {
+                    "scheme": "exact",
+                    "network": "eip155:8453",
+                    "amount": "10000",
+                    "payTo": "0x1111111111111111111111111111111111111111",
+                }
+            ],
+        }
+        handler = lambda req: _b64_obj(payload)
+        async with make_client(handler) as client:
+            result = await engine_checks.check_caip2(client, "https://api.example.com")
+        assert result.status == "PASS"
+        assert result.details["valid"] is True
+        assert result.details["caip2_value"] == "eip155:8453"
+
+    @pytest.mark.asyncio
+    async def test_pass_accepts_second_entry_valid(self, make_client) -> None:
+        """First accepts entry without a network does not mask a valid one."""
+        payload = {
+            "x402Version": 2,
+            "accepts": [
+                {"scheme": "exact", "amount": "10000"},
+                {"scheme": "exact", "network": "eip155:8453"},
+            ],
+        }
+        handler = lambda req: _b64_obj(payload)
+        async with make_client(handler) as client:
+            result = await engine_checks.check_caip2(client, "https://api.example.com")
+        assert result.status == "PASS"
+        assert result.details["caip2_value"] == "eip155:8453"
+
+    @pytest.mark.asyncio
+    async def test_fail_accepts_network_invalid(self, make_client) -> None:
+        payload = {
+            "x402Version": 2,
+            "accepts": [{"scheme": "exact", "network": "not-caip2"}],
+        }
+        handler = lambda req: _b64_obj(payload)
+        async with make_client(handler) as client:
+            result = await engine_checks.check_caip2(client, "https://api.example.com")
+        assert result.status == "FAIL"
+        assert "not-caip2" in result.message
+
+    @pytest.mark.asyncio
+    async def test_top_level_takes_priority_over_accepts(self, make_client) -> None:
+        payload = {
+            "network": "solana:mainnet",
+            "accepts": [{"network": "eip155:8453"}],
+        }
+        handler = lambda req: _b64_obj(payload)
+        async with make_client(handler) as client:
+            result = await engine_checks.check_caip2(client, "https://api.example.com")
+        assert result.status == "PASS"
+        assert result.details["caip2_value"] == "solana:mainnet"
+
+
+class TestNetworkCandidates:
+    def test_top_level_network(self) -> None:
+        assert engine_checks._network_candidates({"network": "eip155:1"}) == ["eip155:1"]
+
+    def test_chain_id_alias(self) -> None:
+        assert engine_checks._network_candidates({"chainId": "solana:mainnet"}) == ["solana:mainnet"]
+
+    def test_accepts_entries_in_order(self) -> None:
+        obj = {"accepts": [{"network": "eip155:1"}, {"network": "eip155:8453"}]}
+        assert engine_checks._network_candidates(obj) == ["eip155:1", "eip155:8453"]
+
+    def test_top_level_first_then_accepts(self) -> None:
+        obj = {"network": "eip155:1", "accepts": [{"network": "eip155:8453"}]}
+        assert engine_checks._network_candidates(obj) == ["eip155:1", "eip155:8453"]
+
+    def test_non_dict_accepts_entries_skipped(self) -> None:
+        obj = {"accepts": ["nope", 7, {"network": "eip155:8453"}]}
+        assert engine_checks._network_candidates(obj) == ["eip155:8453"]
+
+    def test_empty_when_no_network_anywhere(self) -> None:
+        assert engine_checks._network_candidates({"scheme": "exact"}) == []
+
+    @pytest.mark.asyncio
     async def test_fail_no_payment_headers(self, make_client) -> None:
         handler = lambda req: _json_response(200, {"hello": "world"})
         async with make_client(handler) as client:
@@ -1130,6 +1217,49 @@ class TestX402Auditor:
         names = [c.check_name for c in report.checks]
         assert "marketplace_products" in names
         assert any(n.startswith("product_check") for n in names)
+
+    @pytest.mark.asyncio
+    async def test_marketplace_caip2_falls_back_to_product_payloads(self, make_client) -> None:
+        """A free-discovery root (HTTP 200, no payment headers) must not mask
+        the valid CAIP-2 networks declared in paid products' 402
+        PaymentRequired payloads. Regression: the audit used to FAIL
+        caip2_compliance against the root alone and never look at products."""
+        product = _valid_product("paid1")
+        v2_payload = {
+            "x402Version": 2,
+            "error": "payment required",
+            "accepts": [
+                {
+                    "scheme": "exact",
+                    "network": "eip155:8453",
+                    "amount": "10000",
+                    "payTo": "0x1111111111111111111111111111111111111111",
+                }
+            ],
+        }
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            url = str(req.url)
+            if "/.well-known/x402" in url:
+                return _payload_response({"products": [product]})
+            if product["endpoint"] in url:
+                return _b64_obj(v2_payload)
+            return _json_response(200, {"catalog": "free"})
+
+        async with X402Auditor(transport=httpx.MockTransport(handler)) as auditor:
+            report = await auditor.run_full_audit(
+                "https://api.example.com", mode=CheckMode.MARKETPLACE,
+            )
+
+        caip2 = [c for c in report.checks if c.check_name == "caip2_compliance"]
+        assert caip2, "caip2 check missing from report"
+        assert not any(c.status == "FAIL" for c in caip2), \
+            f"checks={[c.check_name + '=' + c.status for c in report.checks]}"
+        assert caip2[0].status == "PASS"
+        assert caip2[0].details["header_name"] == "product.payment-required"
+        assert caip2[0].details["caip2_value"] == "eip155:8453"
+        assert report.overall_status == "PASS", \
+            f"checks={[c.check_name + '=' + c.status for c in report.checks]}"
 
     @pytest.mark.asyncio
     async def test_marketplace_mode_handles_manifest_fetch_error(self, make_client) -> None:

@@ -4,6 +4,38 @@ All notable changes to x402-conformance-suite are documented here. Format follow
 [Keep a Changelog](https://keepachangelog.com). This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-07-27
+
+### Fixed
+
+- `check_caip2` only read the network identifier at the top level of the
+  decoded payment payload (`network` / `chainId`). x402 v2 PaymentRequired
+  carries the network per payment option at `accepts[].network`, so every
+  strict-v2 endpoint was falsely reported as CAIP-2 non-compliant. The
+  parser now collects candidates from both locations (top-level first,
+  then each `accepts[]` entry in order) and PASSes on the first valid
+  CAIP-2 value. Confirmed live against a production merchant whose 402
+  payload was valid v2 (`accepts[0].network = eip155:8453`) yet audited
+  FAIL before this fix.
+- Marketplace mode ran `check_caip2` against the catalog root URL only.
+  Merchants with an intentionally free discovery page (HTTP 200, no
+  payment headers) auto-failed CAIP-2 even when every paid product
+  returned a conformant 402. When the root probe finds no payment header,
+  the audit now falls back to the networks declared in each paid
+  product's own 402 PaymentRequired payload (captured during the
+  per-product walk, no extra requests) and the product-derived result
+  supersedes the root "header missing" FAIL in place, so the aggregate
+  verdict reflects the networks the products actually enforce.
+- Reported by a merchant via Discord after the 0.4.0 outreach round;
+  both failure modes reproduced live before fixing.
+
+### Added
+
+- 11 regression tests: v2 `accepts[].network` pass/invalid/second-entry/
+  top-level-priority cases for `check_caip2`, `_network_candidates` unit
+  tests, and a marketplace-mode auditor test proving the free-root +
+  paid-product layout now aggregates PASS.
+
 ## [0.3.1] - 2026-07-27
 
 ### Fixed
@@ -30,7 +62,7 @@ All notable changes to x402-conformance-suite are documented here. Format follow
   tests + two negative fixtures (no package/CLI/MCP — per upstream
   maintainer's review on PR #9).
 
-## [Unreleased]
+## [0.4.0] - 2026-07-27
 
 ### Quality refactor
 
