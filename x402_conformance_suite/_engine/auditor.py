@@ -76,6 +76,30 @@ def _networks_from_headers(headers: dict[str, Any]) -> list[str]:
     return _network_candidates(obj)
 
 
+def _manifest_network_candidates(manifest: dict[str, Any]) -> list[tuple[str, str]]:
+    """Collect (source, network) candidates declared by the manifest itself.
+
+    Sources checked, in order: top-level ``network``, ``accepts[].network``,
+    and ``resources[].accepts[].network``. Merchants with a free discovery
+    root often declare the enforced networks here rather than in any root
+    response header.
+    """
+    candidates: list[tuple[str, str]] = []
+    top = manifest.get("network")
+    if isinstance(top, str) and top:
+        candidates.append(("manifest.network", top))
+    for entry in manifest.get("accepts") or []:
+        if isinstance(entry, dict) and entry.get("network"):
+            candidates.append(("manifest.accepts", str(entry["network"])))
+    for resource in manifest.get("resources") or []:
+        if not isinstance(resource, dict):
+            continue
+        for entry in resource.get("accepts") or []:
+            if isinstance(entry, dict) and entry.get("network"):
+                candidates.append(("manifest.resources.accepts", str(entry["network"])))
+    return candidates
+
+
 class X402Auditor:
     """Asynchronous auditor for x402 endpoint conformance.
 
@@ -160,8 +184,25 @@ class X402Auditor:
         # 1) Manifest discovery
         checks.append(await check_manifest(self._client, target_url))
 
+        # Fetch the manifest payload once for the network fallbacks below
+        # (the check itself does not return it).
+        manifest_url = target_url.rstrip("/") + MANIFEST_PATH_SUFFIX
+        try:
+            manifest_payload = (await self._client.get(manifest_url)).json()
+        except Exception:
+            manifest_payload = {}
+        if not isinstance(manifest_payload, dict):
+            manifest_payload = {}
+
         # 2) CAIP-2 compliance (probes response headers)
         checks.append(await check_caip2(self._client, target_url))
+
+        # Manifest-declared network fallback: a free discovery root (HTTP
+        # 200, no payment headers) must not mask networks the manifest
+        # itself declares (accepts[].network / resources[].accepts[].network
+        # / top-level network). Supersedes the root "header missing" FAIL
+        # in place so the aggregate verdict reflects declared networks.
+        self._apply_manifest_network_fallback(checks, manifest_payload)
 
         # 3) JSON resilience on a 402 response (skipped if not 402)
         checks.append(await check_json_resilience(self._client, target_url))
@@ -171,7 +212,7 @@ class X402Auditor:
 
         # 5..7) Marketplace-only checks
         if mode == CheckMode.MARKETPLACE:
-            await self._run_marketplace_checks(target_url, checks)
+            await self._run_marketplace_checks(target_url, checks, manifest_payload)
 
         # Aggregate
         overall = self._worst_status(checks)
@@ -191,19 +232,42 @@ class X402Auditor:
     # Marketplace helpers (private)
     # ------------------------------------------------------------------
 
+    def _apply_manifest_network_fallback(
+        self, checks: list[CheckResult], manifest_payload: dict[str, Any]
+    ) -> None:
+        """Supersede a root "header missing" CAIP-2 FAIL when the manifest
+        itself declares a valid CAIP-2 network (any source). In-place."""
+        candidates = _manifest_network_candidates(manifest_payload)
+        if not candidates:
+            return
+        for check in checks:
+            if (
+                isinstance(check, Caip2Result)
+                and check.details.get("header_present") is False
+            ):
+                for source, network_str in candidates:
+                    if CAIP2_PATTERN.match(network_str):
+                        check.status = "PASS"
+                        check.message = (
+                            f"CAIP-2 network from manifest declaration: {network_str}"
+                        )
+                        check.details = {
+                            "header_present": True,
+                            "header_name": source,
+                            "caip2_value": network_str,
+                            "valid": True,
+                        }
+                        return
+                return
+
     async def _run_marketplace_checks(
-        self, target_url: str, checks: list[CheckResult]
+        self,
+        target_url: str,
+        checks: list[CheckResult],
+        manifest_payload: dict[str, Any],
     ) -> None:
         """Append marketplace + per-product results to ``checks`` in-place."""
         assert self._client is not None  # enforced by caller
-        manifest_url = target_url.rstrip("/") + MANIFEST_PATH_SUFFIX
-        try:
-            manifest_payload = (await self._client.get(manifest_url)).json()
-        except Exception:
-            manifest_payload = {}
-
-        if not isinstance(manifest_payload, dict):
-            manifest_payload = {}
 
         checks.append(
             await check_marketplace(self._client, target_url, manifest_payload)
@@ -266,12 +330,19 @@ class X402Auditor:
                             break
                     break
 
-        # If manifest declares a top-level network, also check it
+        # If manifest declares a top-level network, also check it — unless a
+        # fallback above already reported that same value (avoid duplicates).
         manifest_network = manifest_payload.get("network")
         if (
             isinstance(manifest_network, str)
             and manifest_network
             and CAIP2_PATTERN.match(manifest_network)
+            and not any(
+                isinstance(c, Caip2Result)
+                and c.details.get("caip2_value") == manifest_network
+                and c.status == "PASS"
+                for c in checks
+            )
         ):
             checks.append(
                 Caip2Result(

@@ -26,15 +26,24 @@ All notable changes to x402-conformance-suite are documented here. Format follow
   per-product walk, no extra requests) and the product-derived result
   supersedes the root "header missing" FAIL in place, so the aggregate
   verdict reflects the networks the products actually enforce.
+- The manifest-declared network fallback only read a top-level
+  `manifest.network` string and only ran in marketplace mode. Manifests
+  like AsterPay's declare the enforced network at `accepts[].network`
+  (or `resources[].accepts[].network`), and standard-mode audits (what
+  the API serves) had no fallback at all. The fallback now collects
+  candidates from all three manifest locations and runs in both modes,
+  superseding the root "header missing" FAIL in place. Verified live:
+  AsterPay standard audit 4/4 PASS (was caip2_compliance FAIL).
 - Reported by a merchant via Discord after the 0.4.0 outreach round;
   both failure modes reproduced live before fixing.
 
 ### Added
 
-- 11 regression tests: v2 `accepts[].network` pass/invalid/second-entry/
+- 14 regression tests: v2 `accepts[].network` pass/invalid/second-entry/
   top-level-priority cases for `check_caip2`, `_network_candidates` unit
-  tests, and a marketplace-mode auditor test proving the free-root +
-  paid-product layout now aggregates PASS.
+  tests, a marketplace-mode auditor test proving the free-root +
+  paid-product layout aggregates PASS, and three manifest-fallback tests
+  (`accepts[]`, `resources[].accepts[]`, root-header-wins).
 
 ## [0.3.1] - 2026-07-27
 

@@ -1262,6 +1262,82 @@ class TestX402Auditor:
             f"checks={[c.check_name + '=' + c.status for c in report.checks]}"
 
     @pytest.mark.asyncio
+    async def test_manifest_accepts_network_fallback_standard_mode(self, make_client) -> None:
+        """Standard mode: free root (200) + manifest declaring accepts[].network
+        must yield caip2 PASS. Regression: AsterPay's manifest declares
+        accepts[].network = eip155:8453 yet audited FAIL before this fix."""
+        bazaar = {
+            "info": {
+                "input": {"type": "http", "method": "GET"},
+                "output": {"type": "json"},
+            },
+        }
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            url = str(req.url)
+            if "/.well-known/x402" in url:
+                return _payload_response({
+                    "x402Version": 2,
+                    "payTo": "0xabc",
+                    "accepts": [
+                        {"scheme": "exact", "network": "eip155:8453"}
+                    ],
+                    "resources": [],
+                })
+            return _json_response(200, {"docs": "free"})
+
+        async with X402Auditor(transport=httpx.MockTransport(handler)) as auditor:
+            report = await auditor.run_full_audit("https://api.example.com")
+
+        caip2 = [c for c in report.checks if c.check_name == "caip2_compliance"]
+        assert len(caip2) == 1
+        assert caip2[0].status == "PASS"
+        assert caip2[0].details["header_name"] == "manifest.accepts"
+        assert caip2[0].details["caip2_value"] == "eip155:8453"
+
+    @pytest.mark.asyncio
+    async def test_manifest_resources_accepts_network_fallback(self, make_client) -> None:
+        """Networks declared under resources[].accepts[].network also count."""
+        def handler(req: httpx.Request) -> httpx.Response:
+            url = str(req.url)
+            if "/.well-known/x402" in url:
+                return _payload_response({
+                    "resources": [
+                        {
+                            "url": "https://api.example.com/v1/price",
+                            "accepts": [
+                                {"scheme": "exact", "network": "eip155:8453"}
+                            ],
+                        }
+                    ]
+                })
+            return _json_response(200, {"docs": "free"})
+
+        async with X402Auditor(transport=httpx.MockTransport(handler)) as auditor:
+            report = await auditor.run_full_audit("https://api.example.com")
+
+        caip2 = [c for c in report.checks if c.check_name == "caip2_compliance"]
+        assert len(caip2) == 1
+        assert caip2[0].status == "PASS"
+        assert caip2[0].details["header_name"] == "manifest.resources.accepts"
+
+    @pytest.mark.asyncio
+    async def test_no_fallback_when_root_has_valid_header(self, make_client) -> None:
+        """Root header result wins when present; manifest fallback stays out."""
+        def handler(req: httpx.Request) -> httpx.Response:
+            url = str(req.url)
+            if "/.well-known/x402" in url:
+                return _payload_response({"network": "solana:mainnet"})
+            return _b64_obj({"network": "eip155:8453"})
+
+        async with X402Auditor(transport=httpx.MockTransport(handler)) as auditor:
+            report = await auditor.run_full_audit("https://api.example.com")
+
+        caip2 = [c for c in report.checks if c.check_name == "caip2_compliance"]
+        assert caip2[0].details["caip2_value"] == "eip155:8453"
+        assert caip2[0].details["header_name"] != "manifest.network"
+
+    @pytest.mark.asyncio
     async def test_marketplace_mode_handles_manifest_fetch_error(self, make_client) -> None:
         """If the manifest fetch fails in marketplace mode, marketplace check still runs."""
         def handler(req: httpx.Request) -> httpx.Response:
