@@ -2,7 +2,7 @@ import json
 import os
 import pytest
 
-from x402_validator.cli import (
+from x402_conformance_suite.cli import (
     read_urls_from_file,
     report_to_row,
     write_csv,
@@ -10,7 +10,7 @@ from x402_validator.cli import (
     write_html,
     audit_command,
 )
-from x402_validator._engine import (
+from x402_conformance_suite._engine import (
     AuditReport,
     ManifestResult,
     Caip2Result,

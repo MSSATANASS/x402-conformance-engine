@@ -24,13 +24,13 @@ from typing import Any, Mapping
 
 import httpx
 
-from x402_validator._engine import messages as msg
-from x402_validator._engine.constants import (
+from x402_conformance_suite._engine import messages as msg
+from x402_conformance_suite._engine.constants import (
     CAIP2_PATTERN,
     MANIFEST_PATH_SUFFIX,
     PAYMENT_HEADERS,
 )
-from x402_validator._engine.models import (
+from x402_conformance_suite._engine.models import (
     BazaarResult,
     Caip2Result,
     CheckResult,

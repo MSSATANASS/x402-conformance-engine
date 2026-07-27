@@ -17,7 +17,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Any
 
-from x402_validator._engine import X402Auditor
+from x402_conformance_suite._engine import X402Auditor
 
 
 JSON_RPC_VERSION = "2.0"

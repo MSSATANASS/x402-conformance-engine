@@ -21,7 +21,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Sequence
 
-from x402_validator._engine import X402Auditor, AuditReport, run_audit
+from x402_conformance_suite._engine import X402Auditor, AuditReport, run_audit
 
 
 # ---------------------------------------------------------------------------

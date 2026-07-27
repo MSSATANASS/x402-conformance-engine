@@ -1,7 +1,7 @@
 # Validation Report — v0.3 Engine
 
 Run date: 2026-07-27
-Engine: `x402_validator._engine` (modular, 100% test coverage)
+Engine: `x402_conformance_suite._engine` (modular, 100% test coverage)
 Tool: `audit_validation_v0.3.json` (machine-readable source)
 
 ## Headline
@@ -79,7 +79,7 @@ batch run, since each product probe multiplies the request count.
 source venv/bin/activate
 PYTHONPATH=. python -c "
 import asyncio
-from x402_validator._engine import X402Auditor
+from x402_conformance_suite._engine import X402Auditor
 
 URLS = open('endpoints_to_audit.txt').read().split()
 async def main():

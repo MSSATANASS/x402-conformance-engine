@@ -29,7 +29,7 @@ A conformance engine that:
 ## Architecture
 
 ```
-x402_validator/_engine/
+x402_conformance_suite/_engine/
 ├── __init__.py      ← public re-exports only (4 lines)
 ├── auditor.py       ← X402Auditor + run_audit — orchestration
 ├── checks.py        ← check_manifest, check_caip2, check_json_resilience,
@@ -130,7 +130,7 @@ Tests assert every branch in the engine. If you add a branch, add a test.
 
 ## What's NOT in this engine
 
-These concerns live in `MSSATANASS/x402-validator-tools` (separate repo):
+These concerns live in `MSSATANASS/x402-conformance-suite-tools` (separate repo):
 
 - Dashboard / web UI (Flask)
 - Server endpoint exposing audit as a paid API (Stripe)

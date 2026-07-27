@@ -1,13 +1,13 @@
 """Comprehensive tests for the x402 conformance engine.
 
-Every check function in :mod:`x402_validator._engine.checks` is exercised
+Every check function in :mod:`x402_conformance_suite._engine.checks` is exercised
 across all status paths: PASS, FAIL, CRITICAL_FAIL, ERROR, plus skip cases.
 httpx is mocked via :class:`MockTransport` so tests do not perform I/O.
 
 Run a subset:
     pytest tests/test_engine.py -k manifest
 Run with coverage:
-    pytest tests/test_engine.py --cov=x402_validator._engine --cov-report=term-missing
+    pytest tests/test_engine.py --cov=x402_conformance_suite._engine --cov-report=term-missing
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from typing import Any
 import httpx
 import pytest
 
-from x402_validator._engine import (
+from x402_conformance_suite._engine import (
     CAIP2_PATTERN,
     AuditReport,
     BazaarResult,
@@ -34,8 +34,8 @@ from x402_validator._engine import (
     X402Auditor,
     run_audit,
 )
-from x402_validator._engine import checks as engine_checks
-from x402_validator._engine.messages import (
+from x402_conformance_suite._engine import checks as engine_checks
+from x402_conformance_suite._engine.messages import (
     bazaar_malformed,
     bazaar_not_present,
 )

@@ -8,13 +8,13 @@ Layout:
     _engine.auditor    — X402Auditor class (orchestrator)
 """
 
-from x402_validator._engine.auditor import X402Auditor, run_audit
-from x402_validator._engine.constants import (
+from x402_conformance_suite._engine.auditor import X402Auditor, run_audit
+from x402_conformance_suite._engine.constants import (
     CAIP2_PATTERN,
     PAYMENT_HEADERS,
     CheckMode,
 )
-from x402_validator._engine.models import (
+from x402_conformance_suite._engine.models import (
     AuditReport,
     BazaarResult,
     Caip2Result,

@@ -3,8 +3,8 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "x402-validator"
-version = "0.3.1"
+name = "x402-conformance-suite"
+version = "0.4.0"
 description = "x402 strict-v2 conformance engine: CLI, MCP server, batch auditor"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -34,15 +34,15 @@ homepage = "https://github.com/MSSATANASS/x402-conformance-engine"
 repository = "https://github.com/MSSATANASS/x402-conformance-engine"
 
 [project.scripts]
-x402-validate = "x402_validator.cli:main"
-x402-mcp = "x402_validator.mcp_server:main"
+x402-validate = "x402_conformance_suite.cli:main"
+x402-mcp = "x402_conformance_suite.mcp_server:main"
 
 [tool.setuptools.packages.find]
-include = ["x402_validator*"]
+include = ["x402_conformance_suite*"]
 
 [tool.setuptools]
 include-package-data = true
-package-data = {"x402_validator" = ["py.typed"]}
+package-data = {"x402_conformance_suite" = ["py.typed"]}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

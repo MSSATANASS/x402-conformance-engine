@@ -1,4 +1,4 @@
-from x402_validator._engine import (
+from x402_conformance_suite._engine import (
     CAIP2_PATTERN,
     PAYMENT_HEADERS,
     AuditReport,

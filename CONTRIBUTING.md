@@ -1,4 +1,4 @@
-# Contributing to x402-validator
+# Contributing to x402-conformance-suite
 
 The conformance engine is the core IP of this project. Adding checks is welcome;
 changing existing checks risks breaking downstream operators who pin to a version.
@@ -20,16 +20,16 @@ pip install pytest pytest-asyncio pytest-cov
 pytest tests/ -v
 
 # With coverage (must hit 100% on the engine)
-pytest tests/test_engine.py --cov=x402_validator/_engine --cov-report=term-missing
+pytest tests/test_engine.py --cov=x402_conformance_suite/_engine --cov-report=term-missing
 ```
 
-Coverage must remain at **100%** for `x402_validator/_engine/`. If your PR adds a
+Coverage must remain at **100%** for `x402_conformance_suite/_engine/`. If your PR adds a
 branch without a test, CI will fail.
 
 ## How checks are structured
 
-Each check is one `async def` in `x402_validator/_engine/checks.py`, returning a
-Pydantic model from `x402_validator/_engine/models.py`. Human messages live in
+Each check is one `async def` in `x402_conformance_suite/_engine/checks.py`, returning a
+Pydantic model from `x402_conformance_suite/_engine/models.py`. Human messages live in
 `messages.py` — checks never inline text.
 
 ```
@@ -43,7 +43,7 @@ def check_<name>(client, ...) -> SomeResult:
 
 ## Adding a new check
 
-1. **Define a Pydantic model** in `x402_validator/_engine/models.py`:
+1. **Define a Pydantic model** in `x402_conformance_suite/_engine/models.py`:
 
    ```python
    class MyNewResult(CheckResult):
@@ -61,7 +61,7 @@ def check_<name>(client, ...) -> SomeResult:
    - one ERROR / timeout
    - one malformed-input case
    - one edge case (boundary value, empty, oversized)
-6. **Run the full suite** — `pytest tests/test_engine.py -v --cov=x402_validator/_engine`.
+6. **Run the full suite** — `pytest tests/test_engine.py -v --cov=x402_conformance_suite/_engine`.
 
 ## Rules for check messages
 
@@ -82,14 +82,14 @@ def check_<name>(client, ...) -> SomeResult:
 
 ## Adding a new report format (CSV, JSON, HTML)
 
-Report formats live in `x402_validator/cli.py`. Each writer is a `def write_X(reports, path) -> None`
+Report formats live in `x402_conformance_suite/cli.py`. Each writer is a `def write_X(reports, path) -> None`
 function. The CLI dispatcher validates the format name against `writers.keys()`.
 Do not change the JSON shape without bumping the major version.
 
 ## Breaking change policy
 
-Anything in `x402_validator/_engine/__init__.py`, `x402_validator/cli.py`, or
-`x402_validator/mcp_server.py` is public. Renaming a function, changing a
+Anything in `x402_conformance_suite/_engine/__init__.py`, `x402_conformance_suite/cli.py`, or
+`x402_conformance_suite/mcp_server.py` is public. Renaming a function, changing a
 return type, or removing a status literal is a **breaking change** and
 requires bumping the major version and a CHANGELOG entry.
 

@@ -195,7 +195,7 @@ One-shot entry point.
 
 ```python
 import asyncio
-from x402_validator._engine import run_audit
+from x402_conformance_suite._engine import run_audit
 
 async def main():
     report = await run_audit("https://observer.137-184-67-179.sslip.io")
@@ -209,7 +209,7 @@ asyncio.run(main())
 Use as an async context manager:
 
 ```python
-async with X402Auditor(timeout=15.0, default_headers={"User-Agent": "x402-validator"}) as auditor:
+async with X402Auditor(timeout=15.0, default_headers={"User-Agent": "x402-conformance-suite"}) as auditor:
     report = await auditor.run_full_audit("https://example.com", mode="marketplace")
 ```
 
@@ -234,7 +234,7 @@ Public methods:
 ## Constants
 
 ```python
-from x402_validator._engine import (
+from x402_conformance_suite._engine import (
     CAIP2_PATTERN,    # re.Pattern[str] — CAIP-2 regex
     PAYMENT_HEADERS,  # tuple[str, ...] — probed in priority order
     CheckMode,        # class with .STANDARD, .MARKETPLACE, .ALL

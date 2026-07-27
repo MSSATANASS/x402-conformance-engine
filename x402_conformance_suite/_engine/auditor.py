@@ -28,7 +28,7 @@ from typing import Any, Final, Literal
 
 import httpx
 
-from x402_validator._engine.checks import (
+from x402_conformance_suite._engine.checks import (
     check_bazaar,
     check_bazaar_for_url,
     check_caip2,
@@ -37,12 +37,12 @@ from x402_validator._engine.checks import (
     check_marketplace,
     check_product_endpoint,
 )
-from x402_validator._engine.constants import (
+from x402_conformance_suite._engine.constants import (
     CAIP2_PATTERN,
     CheckMode,
     MANIFEST_PATH_SUFFIX,
 )
-from x402_validator._engine.models import (
+from x402_conformance_suite._engine.models import (
     AuditReport,
     Caip2Result,
     CheckResult,

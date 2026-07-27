@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to x402-validator are documented here. Format follows
+All notable changes to x402-conformance-suite are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com). This project adheres to
 [Semantic Versioning](https://semver.org/).
 
@@ -38,7 +38,7 @@ The conformance engine was split from a single 670-line file into a
 focused package of single-responsibility modules. No behaviour change
 intended; observable output and CLI are identical.
 
-- Engine refactored into the `x402_validator._engine` *package* with:
+- Engine refactored into the `x402_conformance_suite._engine` *package* with:
   - `auditor.py` — `X402Auditor` and `run_audit` orchestration.
   - `checks.py` — one async function per check (`check_manifest`,
     `check_caip2`, `check_json_resilience`, `check_bazaar`,
@@ -51,7 +51,7 @@ intended; observable output and CLI are identical.
 - Legacy `x402_conformance_engine.py` removed (was a 428-line duplicate of
   the published engine structure).
 - `tests/test_engine.py` introduced (60 kB, 118 tests). 100 % line
-  coverage of `x402_validator/_engine/`.
+  coverage of `x402_conformance_suite/_engine/`.
 - `tests/test_bazaar_checker.py`, `tests/test_marketplace.py`,
   `tests/test_ecosystem_checks.py`,
   `tests/test_x402_conformance_engine.py` removed (tested the legacy
@@ -62,7 +62,7 @@ intended; observable output and CLI are identical.
 - `docs/VALIDATION_REPORT_v0.3.md` — 27 endpoints audited in 5.2 s.
 - `CONTRIBUTING.md` rewritten in English with explicit rules for adding
   checks without breaking the contract.
-- `x402_validator/cli.py::audit_command` now accepts `output` as either
+- `x402_conformance_suite/cli.py::audit_command` now accepts `output` as either
   `list[str]` or `str` (backward compatible with previous single-string
   callers).
 - `X402Auditor` constructor accepts an optional `transport=` for

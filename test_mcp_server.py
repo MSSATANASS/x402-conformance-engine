@@ -2,8 +2,8 @@ import json
 import pytest
 from unittest.mock import AsyncMock, patch
 
-from x402_validator.mcp_server import MCPValidatorServer
-from x402_validator._engine import (
+from x402_conformance_suite.mcp_server import MCPValidatorServer
+from x402_conformance_suite._engine import (
     AuditReport,
     ManifestResult,
     Caip2Result,
@@ -45,7 +45,7 @@ async def test_tools_list(server: MCPValidatorServer) -> None:
 @pytest.mark.asyncio
 async def test_tools_call_succeeds(server: MCPValidatorServer) -> None:
     with patch(
-        "x402_validator.mcp_server.run_validation",
+        "x402_conformance_suite.mcp_server.run_validation",
         new_callable=AsyncMock,
     ) as mock:
         mock.return_value = {

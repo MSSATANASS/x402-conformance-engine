@@ -1,9 +1,9 @@
-# x402-validator
+# x402-conformance-suite
 
 Audit, monitor, and protect endpoints against the **x402 strict-v2** standard.
 
 ```bash
-pip install x402-validator
+pip install x402-conformance-suite
 ```
 
 ## Quick examples
@@ -26,7 +26,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | x402-mcp
 Python:
 ```python
 import asyncio
-from x402_validator._engine import run_audit
+from x402_conformance_suite._engine import run_audit
 
 async def main():
     report = await run_audit("https://example.com")
@@ -51,7 +51,7 @@ For multi-product catalogs, use `mode="marketplace"` (see [API.md](docs/API.md))
 ## Extended tools (separate repo)
 
 Dashboard, API server, Stripe monetization, and proxy middleware:
-[MSSATANASS/x402-validator-tools](https://github.com/MSSATANASS/x402-validator-tools)
+[MSSATANASS/x402-conformance-suite-tools](https://github.com/MSSATANASS/x402-conformance-suite-tools)
 
 ## Documentation
 
