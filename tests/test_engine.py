@@ -525,6 +525,226 @@ class TestNetworkCandidates:
 
 
 # ---------------------------------------------------------------------------
+# 3b. Bot-wall detection
+# ---------------------------------------------------------------------------
+
+
+class TestCheckBotWall:
+
+    @pytest.mark.asyncio
+    async def test_pass_plain_200(self, make_client) -> None:
+        async with make_client(lambda req: _json_response(200, {"ok": True})) as client:
+            result = await engine_checks.check_bot_wall(client, "https://api.example.com")
+        assert result.status == "PASS"
+        assert result.details["blocked"] is False
+
+    @pytest.mark.asyncio
+    async def test_fail_cloudflare_challenge_403(self, make_client) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            return _json_response(
+                403,
+                {"error": "forbidden"},
+                headers={"cf-mitigated": "challenge", "server": "cloudflare"},
+            )
+        async with make_client(handler) as client:
+            result = await engine_checks.check_bot_wall(client, "https://api.example.com")
+        assert result.status == "FAIL"
+        assert result.details["blocked"] is True
+        assert any("cf-mitigated" in s for s in result.details["signals"])
+
+    @pytest.mark.asyncio
+    async def test_fail_sucuri_header(self, make_client) -> None:
+        async with make_client(
+            lambda req: _json_response(403, {"e": "x"}, headers={"x-sucuri-block": "1"})
+        ) as client:
+            result = await engine_checks.check_bot_wall(client, "https://api.example.com")
+        assert result.status == "FAIL"
+        assert result.details["blocked"] is True
+
+    @pytest.mark.asyncio
+    async def test_pass_403_without_bot_signals(self, make_client) -> None:
+        """A plain 403 with no bot-wall fingerprints is not flagged."""
+        async with make_client(lambda req: _json_response(403, {"error": "forbidden"})) as client:
+            result = await engine_checks.check_bot_wall(client, "https://api.example.com")
+        assert result.status == "PASS"
+        assert result.details["blocked"] is False
+
+    @pytest.mark.asyncio
+    async def test_fail_503_two_body_markers(self, make_client) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                503,
+                content=b"<html>cf_chl_xxxx <script src=\"g-recaptcha\"></script></html>",
+                headers={"content-type": "text/html"},
+            )
+        async with make_client(handler) as client:
+            result = await engine_checks.check_bot_wall(client, "https://api.example.com")
+        assert result.status == "FAIL"
+        assert result.details["blocked"] is True
+
+    @pytest.mark.asyncio
+    async def test_error_on_network_failure(self, make_client) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("simulated")
+        async with make_client(handler) as client:
+            result = await engine_checks.check_bot_wall(client, "https://api.example.com")
+        assert result.status == "ERROR"
+
+
+# ---------------------------------------------------------------------------
+# 3c. accepts[] completeness
+# ---------------------------------------------------------------------------
+
+
+_COMPLETE_V2: dict[str, Any] = {
+    "x402Version": 2,
+    "error": "payment required",
+    "accepts": [
+        {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "5000",
+            "payTo": "0x1111111111111111111111111111111111111111",
+            "resource": "https://api.example.com",
+        }
+    ],
+}
+
+
+class TestCheckAcceptsCompleteness:
+
+    @pytest.mark.asyncio
+    async def test_pass_complete_v2(self, make_client) -> None:
+        async with make_client(lambda req: _b64_obj(_COMPLETE_V2)) as client:
+            result = await engine_checks.check_accepts_completeness(client, "https://api.example.com")
+        assert result.status == "PASS"
+        assert result.details["entries_checked"] == 1
+        assert result.details["findings"] == []
+
+    @pytest.mark.asyncio
+    async def test_fail_missing_payto_and_resource(self, make_client) -> None:
+        payload = {
+            "x402Version": 2,
+            "accepts": [{"scheme": "exact", "network": "eip155:8453", "amount": "5000"}],
+        }
+        async with make_client(lambda req: _b64_obj(payload)) as client:
+            result = await engine_checks.check_accepts_completeness(client, "https://api.example.com")
+        assert result.status == "FAIL"
+        joined = " ".join(result.details["findings"])
+        assert "payTo" in joined
+        assert "resource" in joined
+
+    @pytest.mark.asyncio
+    async def test_fail_dollar_amount(self, make_client) -> None:
+        payload = {
+            "x402Version": 2,
+            "accepts": [
+                {
+                    "scheme": "exact",
+                    "network": "eip155:8453",
+                    "amount": "0.005",
+                    "payTo": "0x1111111111111111111111111111111111111111",
+                    "resource": "https://api.example.com",
+                }
+            ],
+        }
+        async with make_client(lambda req: _b64_obj(payload)) as client:
+            result = await engine_checks.check_accepts_completeness(client, "https://api.example.com")
+        assert result.status == "FAIL"
+        assert any("atomic" in f for f in result.details["findings"])
+
+    @pytest.mark.asyncio
+    async def test_fail_missing_x402version(self, make_client) -> None:
+        payload = {k: v for k, v in _COMPLETE_V2.items() if k != "x402Version"}
+        async with make_client(lambda req: _b64_obj(payload)) as client:
+            result = await engine_checks.check_accepts_completeness(client, "https://api.example.com")
+        assert result.status == "FAIL"
+        assert any("x402Version" in f for f in result.details["findings"])
+
+    @pytest.mark.asyncio
+    async def test_fail_empty_accepts(self, make_client) -> None:
+        async with make_client(lambda req: _b64_obj({"x402Version": 2, "accepts": []})) as client:
+            result = await engine_checks.check_accepts_completeness(client, "https://api.example.com")
+        assert result.status == "FAIL"
+        assert any("accepts[]" in f for f in result.details["findings"])
+
+    @pytest.mark.asyncio
+    async def test_skip_non_402(self, make_client) -> None:
+        async with make_client(lambda req: _json_response(200, {})) as client:
+            result = await engine_checks.check_accepts_completeness(client, "https://api.example.com")
+        assert result.status == "PASS"
+        assert result.details["applicable"] is False
+
+    @pytest.mark.asyncio
+    async def test_fail_resource_url_mismatch(self, make_client) -> None:
+        payload = dict(_COMPLETE_V2)
+        payload["resource"] = {"url": "https://other.example.com/x"}
+        async with make_client(lambda req: _b64_obj(payload)) as client:
+            result = await engine_checks.check_accepts_completeness(client, "https://api.example.com")
+        assert result.status == "FAIL"
+        assert any("resource" in f for f in result.details["findings"])
+
+
+# ---------------------------------------------------------------------------
+# 3d. Discovery resource listing
+# ---------------------------------------------------------------------------
+
+
+class TestCheckDiscoveryResourceListing:
+
+    @pytest.mark.asyncio
+    async def test_pass_resource_listed(self, make_client) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            if "/.well-known/x402" in str(req.url):
+                return _payload_response({"resources": [{"url": "https://api.example.com"}]})
+            return _b64_obj(_COMPLETE_V2)
+        async with make_client(handler) as client:
+            result = await engine_checks.check_discovery_resource_listing(client, "https://api.example.com")
+        assert result.status == "PASS"
+        assert result.details["listed"] is True
+
+    @pytest.mark.asyncio
+    async def test_fail_resource_not_listed(self, make_client) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            if "/.well-known/x402" in str(req.url):
+                return _payload_response({"resources": []})
+            return _b64_obj(_COMPLETE_V2)
+        async with make_client(handler) as client:
+            result = await engine_checks.check_discovery_resource_listing(client, "https://api.example.com")
+        assert result.status == "FAIL"
+        assert "not listed" in result.message
+        assert result.details["listed"] is False
+
+    @pytest.mark.asyncio
+    async def test_skip_non_402(self, make_client) -> None:
+        async with make_client(lambda req: _json_response(200, {})) as client:
+            result = await engine_checks.check_discovery_resource_listing(client, "https://api.example.com")
+        assert result.status == "PASS"
+        assert result.details["applicable"] is False
+
+    @pytest.mark.asyncio
+    async def test_pass_no_resource_declared(self, make_client) -> None:
+        payload = {
+            "x402Version": 2,
+            "accepts": [{"scheme": "exact", "network": "eip155:8453", "amount": "5000", "payTo": "0xabc"}],
+        }
+        async with make_client(lambda req: _b64_obj(payload)) as client:
+            result = await engine_checks.check_discovery_resource_listing(client, "https://api.example.com")
+        assert result.status == "PASS"
+        assert result.details["listed"] is None
+
+    @pytest.mark.asyncio
+    async def test_error_catalog_unreachable(self, make_client) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            if "/.well-known/x402" in str(req.url):
+                raise httpx.ConnectError("simulated")
+            return _b64_obj(_COMPLETE_V2)
+        async with make_client(handler) as client:
+            result = await engine_checks.check_discovery_resource_listing(client, "https://api.example.com")
+        assert result.status == "ERROR"
+
+
+# ---------------------------------------------------------------------------
 # 4. JSON resilience
 # ---------------------------------------------------------------------------
 
@@ -1148,8 +1368,9 @@ class TestX402Auditor:
 
     @pytest.mark.asyncio
     async def test_aggregates_passing_checks(self, make_client) -> None:
-        """All 4 checks pass when endpoint serves a manifest, returns 402 with
-        valid Payment-Required header, and 402 body is JSON + bazaar."""
+        """All 7 checks pass when endpoint serves a manifest listing the audited
+        resource, returns 402 with valid Payment-Required header whose accepts[]
+        entry is complete, and 402 body is JSON + bazaar."""
 
         bazaar = {
             "info": {
@@ -1159,7 +1380,13 @@ class TestX402Auditor:
         }
         payment = {
             "network": "eip155:8453",
-            "accepts": [{"scheme": "exact", "network": "eip155:8453", "amount": "100"}],
+            "accepts": [{
+                "scheme": "exact",
+                "network": "eip155:8453",
+                "amount": "100",
+                "payTo": "0x1111111111111111111111111111111111111111",
+                "resource": "https://api.example.com",
+            }],
             "x402Version": 2,
             "extensions": {"bazaar": bazaar},
         }
@@ -1168,7 +1395,8 @@ class TestX402Auditor:
             url = str(req.url)
             if "/.well-known/x402" in url:
                 return _payload_response({
-                    "accepts": [{"scheme": "exact", "network": "eip155:8453"}]
+                    "accepts": [{"scheme": "exact", "network": "eip155:8453"}],
+                    "resources": [{"url": "https://api.example.com"}],
                 })
             return _b64_obj(payment)
 
@@ -1178,7 +1406,7 @@ class TestX402Auditor:
         assert isinstance(report, AuditReport)
         assert report.overall_status == "PASS", \
             f"checks={[c.check_name + '=' + c.status for c in report.checks]}"
-        assert len(report.checks) == 4
+        assert len(report.checks) == 7
 
     @pytest.mark.asyncio
     async def test_aggregates_critical_fail_priority(self, make_client) -> None:
@@ -1591,14 +1819,23 @@ class TestRunAudit:
     async def test_calls_auditor_and_closes(self, make_client) -> None:
         payment = {
             "network": "eip155:8453",
-            "accepts": [],
+            "accepts": [{
+                "scheme": "exact",
+                "network": "eip155:8453",
+                "amount": "100",
+                "payTo": "0x1111111111111111111111111111111111111111",
+                "resource": "https://api.example.com",
+            }],
             "x402Version": 2,
             "extensions": {"bazaar": {"info": {"input": {"type": "http", "method": "POST"}, "output": {"type": "json", "example": {}}}}},
         }
         def handler(req: httpx.Request) -> httpx.Response:
             url = str(req.url)
             if "/.well-known/x402" in url:
-                return _payload_response({"accepts": []})
+                return _payload_response({
+                    "accepts": [],
+                    "resources": [{"url": "https://api.example.com"}],
+                })
             return _b64_obj(payment)
         report = await run_audit(
             "https://api.example.com",

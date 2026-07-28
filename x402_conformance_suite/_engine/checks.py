@@ -26,14 +26,19 @@ import httpx
 
 from x402_conformance_suite._engine import messages as msg
 from x402_conformance_suite._engine.constants import (
+    BOT_WALL_BODY_MARKERS,
+    BOT_WALL_HEADERS,
     CAIP2_PATTERN,
     MANIFEST_PATH_SUFFIX,
     PAYMENT_HEADERS,
 )
 from x402_conformance_suite._engine.models import (
+    AcceptsCompletenessResult,
     BazaarResult,
+    BotWallResult,
     Caip2Result,
     CheckResult,
+    DiscoveryResourceResult,
     JsonResilienceResult,
     ManifestResult,
     MarketplaceResult,
@@ -753,4 +758,326 @@ async def check_product_endpoint(
         product_id=pid,
         endpoint_url=full_url,
         details={"endpoint": endpoint, "status_code": status, "is_free": False},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bot-wall detection
+# ---------------------------------------------------------------------------
+
+
+async def check_bot_wall(client: httpx.AsyncClient, target_url: str) -> BotWallResult:
+    """Detect bot-protection layers (Cloudflare, Sucuri, Incapsula) answering
+    instead of the origin, which blocks agent buyers before the paywall.
+
+    PASS — no bot-wall signal in status/headers/body.
+    FAIL — HTTP 403 with any header/server/body signal, OR HTTP 403/503 with
+           two or more challenge-body markers.
+    ERROR — network/transport failure.
+    """
+    response = await _safe_get(client, target_url)
+    if response is None:
+        return BotWallResult(
+            status="ERROR",
+            message=f"Network failure probing {target_url} — bot-wall check could not run.",
+            details={"status_code": None, "signals": [], "blocked": False},
+        )
+
+    status = response.status_code
+    signals: list[str] = []
+
+    headers_lower = {k.lower(): v for k, v in response.headers.items()}
+    for header, needles in BOT_WALL_HEADERS.items():
+        value = headers_lower.get(header)
+        if value is None:
+            continue
+        if not needles or any(n.lower() in value.lower() for n in needles):
+            signals.append(f"{header}: {value}")
+
+    server = headers_lower.get("server", "")
+    if any(v in server.lower() for v in ("cloudflare", "sucuri", "incapsula")):
+        signals.append(f"server: {server}")
+
+    body_hits: list[str] = []
+    if status in (403, 503):
+        body_lower = response.text.lower()
+        body_hits = [m for m in BOT_WALL_BODY_MARKERS if m.lower() in body_lower]
+        signals.extend(f"body: {m}" for m in body_hits)
+
+    blocked = (status == 403 and bool(signals)) or (
+        status in (403, 503) and len(body_hits) >= 2
+    )
+
+    if blocked:
+        return BotWallResult(
+            status="FAIL",
+            message=(
+                f"Bot-protection ({', '.join(signals)}) answered with HTTP {status}"
+                " — agent buyers are blocked before they ever see your paywall."
+                " Allowlist agent user-agents or disable challenge for API paths."
+            ),
+            details={"status_code": status, "signals": signals, "blocked": True},
+        )
+
+    return BotWallResult(
+        status="PASS",
+        message=f"No bot-protection detected (HTTP {status}).",
+        details={"status_code": status, "signals": signals, "blocked": False},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Accepts completeness
+# ---------------------------------------------------------------------------
+
+
+def _decode_payment_required(response: httpx.Response) -> dict[str, Any] | None:
+    """Extract the PaymentRequired payload from a 402 response.
+
+    Tries the ``payment-required`` / ``x-payment-required`` headers
+    (base64 JSON) first, then falls back to a JSON object body.
+    """
+    headers_lower = {k.lower(): v for k, v in response.headers.items()}
+    for name in ("payment-required", "x-payment-required"):
+        raw = headers_lower.get(name)
+        if raw:
+            obj = _b64_to_obj(raw)
+            if obj is not None:
+                return obj
+    try:
+        body = response.json()
+    except Exception:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+async def check_accepts_completeness(
+    client: httpx.AsyncClient, target_url: str
+) -> AcceptsCompletenessResult:
+    """Validate every ``accepts[]`` entry of the 402 payload is complete.
+
+    Per entry: scheme, network, payTo (or pay_to), resource, and an atomic-unit
+    amount (``amount`` v2 or ``maxAmountRequired`` v1) as a digit string —
+    decimal points mean dollars, not atomic units. Top-level ``x402Version``
+    must be 1 or 2 and ``resource.url`` must match the probed URL.
+
+    PASS — not 402 (not applicable), OR no findings.
+    FAIL — any missing/invalid field.
+    ERROR — network failure, or 402 without a decodable PaymentRequired.
+    """
+    response = await _safe_get(client, target_url)
+    if response is None:
+        return AcceptsCompletenessResult(
+            status="ERROR",
+            message=f"Network failure probing {target_url} — accepts[] check could not run.",
+            details={"status_code": None, "applicable": None, "entries_checked": 0, "findings": []},
+        )
+
+    status = response.status_code
+    if status != 402:
+        return AcceptsCompletenessResult(
+            status="PASS",
+            message=f"Endpoint returned HTTP {status}, not 402 — accepts[] check not applicable.",
+            details={"status_code": status, "applicable": False},
+        )
+
+    payload = _decode_payment_required(response)
+    if payload is None:
+        return AcceptsCompletenessResult(
+            status="ERROR",
+            message="402 but no decodable PaymentRequired (header or JSON body).",
+            details={"status_code": 402, "applicable": True, "entries_checked": 0, "findings": []},
+        )
+
+    findings: list[str] = []
+
+    version = payload.get("x402Version")
+    if version not in (1, 2):
+        findings.append(f"x402Version missing or unrecognized: {version!r}")
+
+    accepts = payload.get("accepts")
+    if not isinstance(accepts, list) or not accepts:
+        findings.append("accepts[] missing or empty")
+        accepts = []
+
+    for i, entry in enumerate(accepts):
+        if not isinstance(entry, dict):
+            findings.append(f"accepts[{i}] is not an object")
+            continue
+        for field in ("scheme", "network", "resource"):
+            if not entry.get(field):
+                findings.append(f"accepts[{i}].{field} missing")
+        if not (entry.get("payTo") or entry.get("pay_to")):
+            findings.append(f"accepts[{i}].payTo missing")
+        amount = entry.get("amount", entry.get("maxAmountRequired"))
+        if amount is None:
+            findings.append(f"accepts[{i}].amount missing (need 'amount' or 'maxAmountRequired')")
+        elif isinstance(amount, str) and "." in amount:
+            findings.append(
+                f"accepts[{i}].amount looks like dollars, not atomic units:"
+                f" {amount!r} (off by 10^6)"
+            )
+        elif not (isinstance(amount, str) and amount.isdigit()):
+            findings.append(
+                f"accepts[{i}].amount must be a digit string of atomic units, got {amount!r}"
+            )
+
+    resource = payload.get("resource")
+    if isinstance(resource, dict) and resource.get("url"):
+        url = str(resource["url"])
+        if url.rstrip("/") != target_url.rstrip("/"):
+            findings.append(f"resource.url '{url}' does not match probed URL")
+
+    details = {
+        "status_code": 402,
+        "applicable": True,
+        "entries_checked": len(accepts),
+        "findings": findings,
+    }
+
+    if findings:
+        return AcceptsCompletenessResult(
+            status="FAIL",
+            message=f"accepts[] completeness: {len(findings)} problem(s): {findings[0]}",
+            details=details,
+        )
+
+    return AcceptsCompletenessResult(
+        status="PASS",
+        message=(
+            f"All {len(accepts)} accepts[] entries complete"
+            " (scheme, network, atomic amount, payTo, resource)."
+        ),
+        details=details,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Discovery resource listing
+# ---------------------------------------------------------------------------
+
+
+async def check_discovery_resource_listing(
+    client: httpx.AsyncClient, target_url: str
+) -> DiscoveryResourceResult:
+    """Verify the paid resource is listed in ``/.well-known/x402`` so agents
+    can discover it.
+
+    PASS — not 402 (not applicable), payload declares no resource (nothing to
+           verify), OR the resource URL/path appears in the catalog.
+    FAIL — resource paid but absent from ``resources[]``/``products[]``.
+    ERROR — network failure, or catalog unreachable/invalid while a resource
+            is paid.
+    """
+    response = await _safe_get(client, target_url)
+    if response is None:
+        return DiscoveryResourceResult(
+            status="ERROR",
+            message=f"Network failure probing {target_url} — discovery check could not run.",
+            details={"status_code": None, "applicable": None, "listed": None},
+        )
+
+    status = response.status_code
+    if status != 402:
+        return DiscoveryResourceResult(
+            status="PASS",
+            message=f"Endpoint returned HTTP {status}, not 402 — discovery check not applicable.",
+            details={"status_code": status, "applicable": False},
+        )
+
+    payload = _decode_payment_required(response)
+
+    paid_url: str | None = None
+    if payload is not None:
+        resource = payload.get("resource")
+        if isinstance(resource, dict) and resource.get("url"):
+            paid_url = str(resource["url"])
+        else:
+            accepts = payload.get("accepts")
+            if isinstance(accepts, list):
+                for entry in accepts:
+                    if isinstance(entry, dict) and entry.get("resource"):
+                        paid_url = str(entry["resource"])
+                        break
+
+    if not paid_url:
+        return DiscoveryResourceResult(
+            status="PASS",
+            message="402 payload declares no resource — nothing to verify in catalog.",
+            details={"applicable": True, "listed": None, "note": "no resource declared in payload"},
+        )
+
+    # The discovery catalog lives at the ORIGIN root, not under the probed
+    # path — a paid product URL like /paid/x must still resolve the manifest
+    # at scheme://host/.well-known/x402.
+    parsed = httpx.URL(target_url)
+    origin = f"{parsed.scheme}://{parsed.host}"
+    if parsed.port:
+        origin = f"{origin}:{parsed.port}"
+    catalog_url = origin.rstrip("/") + MANIFEST_PATH_SUFFIX
+    catalog_response = await _safe_get(client, catalog_url)
+    manifest: dict[str, Any] | None = None
+    if catalog_response is not None:
+        try:
+            body = catalog_response.json()
+        except Exception:
+            body = None
+        if isinstance(body, dict):
+            manifest = body
+
+    if manifest is None:
+        return DiscoveryResourceResult(
+            status="ERROR",
+            message=(
+                f"Resource {paid_url} is paid but {catalog_url} is unreachable or"
+                " not JSON — cannot verify listing."
+            ),
+            details={"applicable": True, "listed": None, "resource": paid_url},
+        )
+
+    origin_url = httpx.URL(target_url)
+    origin = str(
+        origin_url.copy_with(path="/", query=None, fragment=None)
+    ).rstrip("/")
+
+    candidates: set[str] = set()
+    resources = manifest.get("resources")
+    if isinstance(resources, list):
+        for entry in resources:
+            if isinstance(entry, dict) and entry.get("url"):
+                listed = str(entry["url"]).rstrip("/")
+                candidates.add(listed)
+                if "://" in listed:
+                    candidates.add(httpx.URL(listed).path.rstrip("/"))
+    products = manifest.get("products")
+    if isinstance(products, list):
+        for entry in products:
+            if isinstance(entry, dict) and entry.get("endpoint"):
+                endpoint = str(entry["endpoint"])
+                candidates.add(endpoint.rstrip("/"))
+                candidates.add((origin + endpoint).rstrip("/"))
+
+    paid_norm = paid_url.rstrip("/")
+    paid_path = httpx.URL(paid_norm).path.rstrip("/") if "://" in paid_norm else paid_norm
+    listed = paid_norm in candidates or paid_path in candidates
+
+    if listed:
+        return DiscoveryResourceResult(
+            status="PASS",
+            message=f"Paid resource {paid_url} is listed in {MANIFEST_PATH_SUFFIX}.",
+            details={"applicable": True, "listed": True, "resource": paid_url},
+        )
+
+    return DiscoveryResourceResult(
+        status="FAIL",
+        message=(
+            f"Paid resource {paid_url} is not listed in {MANIFEST_PATH_SUFFIX}"
+            " — agents cannot discover it. Add it to resources[] (or products[])."
+        ),
+        details={
+            "applicable": True,
+            "listed": False,
+            "resource": paid_url,
+            "catalog_size": len(candidates),
+        },
     )

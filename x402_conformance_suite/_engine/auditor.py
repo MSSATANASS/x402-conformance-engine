@@ -6,16 +6,19 @@ This class is the public entry point. It holds the httpx client lifecycle
 
 Two audit modes:
 
-    standard    — runs the four core checks:
+    standard    — runs the seven core checks:
                     1. manifest discovery
                     2. CAIP-2 compliance
                     3. JSON resilience
                     4. Bazaar compliance
+                    5. bot-wall detection
+                    6. ``accepts[]`` completeness
+                    7. discovery catalog resource listing
 
-    marketplace — runs the four standard checks PLUS:
-                    5. catalog-level product conformance
-                    6. one ``product_check`` per endpoint declared in catalog
-                    7. one ``bazaar_compliance`` per paid endpoint walked
+    marketplace — runs the seven standard checks PLUS:
+                    8. catalog-level product conformance
+                    9. one ``product_check`` per endpoint declared in catalog
+                    10. one ``bazaar_compliance`` per paid endpoint walked
 
 Each check returns its own result; this class aggregates them into an
 ``AuditReport``. The status precedence is CRITICAL_FAIL > FAIL > ERROR > PASS.
@@ -31,9 +34,12 @@ import httpx
 from x402_conformance_suite._engine.checks import (
     _b64_to_obj,
     _network_candidates,
+    check_accepts_completeness,
     check_bazaar,
     check_bazaar_for_url,
+    check_bot_wall,
     check_caip2,
+    check_discovery_resource_listing,
     check_json_resilience,
     check_manifest,
     check_marketplace,
@@ -162,7 +168,7 @@ class X402Auditor:
 
         Args:
             target_url: Base URL of the endpoint under audit.
-            mode: ``"standard"`` (4 base checks) or ``"marketplace"``
+            mode: ``"standard"`` (7 base checks) or ``"marketplace"``
                   (adds product-by-product walk + per-product bazaar).
 
         Raises:
@@ -210,7 +216,16 @@ class X402Auditor:
         # 4) Bazaar compliance (skipped if no 402 body)
         checks.append(await check_bazaar_for_url(self._client, target_url))
 
-        # 5..7) Marketplace-only checks
+        # 5) Bot-wall detection (bot-protection blocking agent buyers)
+        checks.append(await check_bot_wall(self._client, target_url))
+
+        # 6) accepts[] completeness (402 payload has full payment options)
+        checks.append(await check_accepts_completeness(self._client, target_url))
+
+        # 7) Paid resource must be listed in the discovery catalog
+        checks.append(await check_discovery_resource_listing(self._client, target_url))
+
+        # 8..10) Marketplace-only checks
         if mode == CheckMode.MARKETPLACE:
             await self._run_marketplace_checks(target_url, checks, manifest_payload)
 

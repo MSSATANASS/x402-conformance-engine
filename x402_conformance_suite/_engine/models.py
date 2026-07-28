@@ -29,6 +29,9 @@ CheckName = Literal[
     "bazaar_compliance",
     "marketplace_products",
     "product_check",
+    "bot_wall",
+    "accepts_completeness",
+    "discovery_resource_listing",
 ]
 
 
@@ -87,6 +90,24 @@ class MarketplaceResult(CheckResult):
     check_name: Literal["marketplace_products"] = "marketplace_products"
     total_products: int = 0
     conformant_count: int = 0
+
+
+class BotWallResult(CheckResult):
+    """Result for ``bot_wall`` — detects bot-protection blocking agent buyers."""
+
+    check_name: Literal["bot_wall"] = "bot_wall"
+
+
+class AcceptsCompletenessResult(CheckResult):
+    """Result for ``accepts_completeness`` — validates every accepts[] entry is complete."""
+
+    check_name: Literal["accepts_completeness"] = "accepts_completeness"
+
+
+class DiscoveryResourceResult(CheckResult):
+    """Result for ``discovery_resource_listing`` — paid resource must appear in catalog."""
+
+    check_name: Literal["discovery_resource_listing"] = "discovery_resource_listing"
 
 
 class AuditReport(BaseModel):

@@ -4,6 +4,39 @@ All notable changes to x402-conformance-suite are documented here. Format follow
 [Keep a Changelog](https://keepachangelog.com). This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-07-27
+
+### Added
+
+Standard audit grows from 4 to 7 checks (additive only — no existing
+check renamed, removed, or reordered).
+
+- `bot_wall` — detects bot-protection layers (Cloudflare challenge,
+  Sucuri, Incapsula/Distil, reCAPTCHA/hCaptcha challenge pages)
+  answering with 403/503 instead of the origin. Bot-walls block agent
+  buyers before they ever see the paywall; this is the #1 silent
+  killer of x402 integrations in the wild.
+- `accepts_completeness` — every `accepts[]` entry must carry `scheme`,
+  `network`, `payTo`, `resource`, and an `amount` (or legacy
+  `maxAmountRequired`) that is a digit string of atomic units — a
+  decimal value like `"0.005"` is flagged as dollars (off by 10⁶).
+  `x402Version` must be present and recognized (1 or 2), and a
+  top-level `resource.url` must match the probed URL. Covers the four
+  "silent first-integration mistakes" documented across the ecosystem.
+- `discovery_resource_listing` — a paid resource (from the 402
+  payload's `resource.url` or `accepts[].resource`) must appear in the
+  origin's `/.well-known/x402` catalog (`resources[]` or `products[]`),
+  otherwise agents cannot discover it.
+
+### Notes
+
+- 18 new tests (6 per check). 203/203 pass.
+- `tests/test_engine.py` audit-level mocks updated: previously
+  incomplete mock payloads now exercise all 7 checks.
+- API consumers: the `checks[]` array in audit reports now contains
+  seven entries in standard mode. Additive change, but any consumer
+  asserting an exact count of 4 must be updated.
+
 ## [0.4.1] - 2026-07-27
 
 ### Fixed

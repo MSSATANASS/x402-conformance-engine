@@ -47,3 +47,32 @@ class CheckMode:
     STANDARD: Final[str] = "standard"
     MARKETPLACE: Final[str] = "marketplace"
     ALL: Final[tuple[str, ...]] = (STANDARD, MARKETPLACE)
+
+
+# ---------------------------------------------------------------------------
+# Bot-wall detection signatures
+# ---------------------------------------------------------------------------
+
+# Headers that indicate a bot-protection layer answered instead of the origin.
+# Values are matched case-insensitively as substrings of the header value.
+BOT_WALL_HEADERS: Final[dict[str, tuple[str, ...]]] = {
+    "cf-mitigated": ("challenge",),
+    "cf-ray": (),  # presence alone (with server: cloudflare) is a signal
+    "x-sucuri-id": (),
+    "x-sucuri-block": (),
+    "x-distil-cs": (),
+    "x-cdn": ("incapsula",),
+    "x-iinfo": (),
+}
+
+# Body substrings (case-insensitive) that indicate a challenge page.
+BOT_WALL_BODY_MARKERS: Final[tuple[str, ...]] = (
+    "cf-challenge",
+    "cf_chl_",
+    "g-recaptcha",
+    "hcaptcha.com",
+    "challenge-platform",
+    "incapsula",
+    "_cfuvid",
+    "just a moment...",
+)
