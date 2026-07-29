@@ -261,6 +261,57 @@ class TestCheckManifest:
         assert result.status == "ERROR"
         assert "RuntimeError" in result.message or "simulated" in result.message
 
+    @pytest.mark.asyncio
+    async def test_pass_with_routes(self, make_client) -> None:
+        """Manifest with routes[] (x402 v2 route catalog) must PASS."""
+        handler = lambda req: _payload_response({
+            "spec_version": "viridis-x402-catalog-v1",
+            "routes": [
+                {
+                    "agent": "regulatory-radar",
+                    "tool": "scan_regulations",
+                    "endpoint": "https://mcp.example.com/x402/regulatory-radar/scan",
+                    "methods": ["GET", "POST"],
+                    "paid_execution_method": "POST",
+                    "price_minor": 25,
+                },
+                {
+                    "agent": "ghg-ledger",
+                    "tool": "calculate_inventory",
+                    "endpoint": "https://mcp.example.com/x402/ghg-ledger/calc",
+                    "methods": ["GET", "POST"],
+                    "paid_execution_method": "POST",
+                    "price_minor": 100,
+                },
+            ],
+        })
+        async with make_client(handler) as client:
+            result = await engine_checks.check_manifest(client, "https://api.example.com")
+        assert result.status == "PASS"
+        assert result.details["has_routes"] is True
+        assert result.details["route_count"] == 2
+        assert "route catalog" in result.message
+
+    @pytest.mark.asyncio
+    async def test_pass_with_routes_empty_but_has_accepts(self, make_client) -> None:
+        """Empty routes + accepts still passes (accepts takes priority)."""
+        handler = lambda req: _payload_response({
+            "accepts": [{"scheme": "exact", "network": "eip155:8453"}],
+            "routes": [],
+        })
+        async with make_client(handler) as client:
+            result = await engine_checks.check_manifest(client, "https://api.example.com")
+        assert result.status == "PASS"
+        assert result.details["has_accepts"] is True
+
+    @pytest.mark.asyncio
+    async def test_fail_routes_not_list(self, make_client) -> None:
+        """routes as non-list should not count."""
+        handler = lambda req: _payload_response({"routes": "not a list"})
+        async with make_client(handler) as client:
+            result = await engine_checks.check_manifest(client, "https://api.example.com")
+        assert result.status == "FAIL"
+
 
 # ---------------------------------------------------------------------------
 # 3. CAIP-2 compliance
@@ -589,6 +640,27 @@ class TestCheckBotWall:
         async with make_client(handler) as client:
             result = await engine_checks.check_bot_wall(client, "https://api.example.com")
         assert result.status == "ERROR"
+
+    @pytest.mark.asyncio
+    async def test_error_distinguishes_timeout_from_connect(self, make_client) -> None:
+        """The new checks must keep the same diagnostic granularity as the
+        original four — 'timed out' and 'connection error' are different
+        operator problems and must not collapse into 'network failure'."""
+        def timeout_handler(req: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectTimeout("simulated")
+
+        def connect_handler(req: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("refused")
+
+        async with make_client(timeout_handler) as client:
+            timed_out = await engine_checks.check_bot_wall(client, "https://api.example.com")
+        async with make_client(connect_handler) as client:
+            refused = await engine_checks.check_bot_wall(client, "https://api.example.com")
+
+        assert timed_out.status == refused.status == "ERROR"
+        assert "timed out" in timed_out.message
+        assert "connection error" in refused.message
+        assert timed_out.message != refused.message
 
 
 # ---------------------------------------------------------------------------
@@ -1208,6 +1280,97 @@ class TestCheckMarketplace:
         errors = result.details["product_details"][0]["errors"]
         assert any("x402 block is not an object" in e for e in errors)
 
+    @pytest.mark.asyncio
+    async def test_pass_routes_normalized_as_products(self, make_client) -> None:
+        """Routes[] entries are normalized into products and counted as conformant."""
+        manifest = {
+            "routes": [
+                {
+                    "agent": "regulatory-radar",
+                    "tool": "scan_regulations",
+                    "endpoint": "https://mcp.example.com/x402/regulatory-radar/scan",
+                    "methods": ["GET", "POST"],
+                    "paid_execution_method": "POST",
+                    "price_minor": 25,
+                },
+                {
+                    "agent": "ghg-ledger",
+                    "tool": "calculate_inventory",
+                    "endpoint": "https://mcp.example.com/x402/ghg-ledger/calc",
+                    "methods": ["GET", "POST"],
+                    "paid_execution_method": "POST",
+                    "price_minor": 100,
+                },
+            ],
+        }
+        async with make_client(lambda req: _json_response(200, {})) as client:
+            result = await engine_checks.check_marketplace(client, "https://api.example.com", manifest)
+        assert result.status == "PASS"
+        assert result.total_products == 2
+        assert result.conformant_count == 2
+        details = result.details["product_details"]
+        assert details[0]["product_id"] == "regulatory-radar/scan_regulations"
+        assert details[1]["product_id"] == "ghg-ledger/calculate_inventory"
+        # Route-derived products have no x402 errors
+        assert details[0]["errors"] == []
+        assert details[1]["errors"] == []
+
+    @pytest.mark.asyncio
+    async def test_pass_routes_default_method_post(self, make_client) -> None:
+        """When paid_execution_method is missing but methods includes POST, default to POST."""
+        manifest = {
+            "routes": [
+                {
+                    "agent": "test-agent",
+                    "tool": "test_tool",
+                    "endpoint": "/x/test",
+                    "methods": ["GET", "POST"],
+                },
+            ],
+        }
+        async with make_client(lambda req: _json_response(200, {})) as client:
+            result = await engine_checks.check_marketplace(client, "https://api.example.com", manifest)
+        assert result.status == "PASS"
+        assert result.total_products == 1
+        assert result.conformant_count == 1
+
+    @pytest.mark.asyncio
+    async def test_pass_routes_default_method_get(self, make_client) -> None:
+        """When paid_execution_method is missing and methods has no POST, default to GET."""
+        manifest = {
+            "routes": [
+                {
+                    "agent": "test-agent",
+                    "tool": "test_tool",
+                    "endpoint": "/x/test",
+                    "methods": ["GET"],
+                },
+            ],
+        }
+        async with make_client(lambda req: _json_response(200, {})) as client:
+            result = await engine_checks.check_marketplace(client, "https://api.example.com", manifest)
+        assert result.status == "PASS"
+
+    @pytest.mark.asyncio
+    async def test_pass_mixed_products_and_routes(self, make_client) -> None:
+        """Manifest with both products[] and routes[] merges them."""
+        manifest = {
+            "products": [_valid_product("a")],
+            "routes": [
+                {
+                    "agent": "regulatory-radar",
+                    "tool": "scan_regulations",
+                    "endpoint": "https://mcp.example.com/x402/regulatory-radar/scan",
+                    "methods": ["GET", "POST"],
+                    "paid_execution_method": "POST",
+                },
+            ],
+        }
+        async with make_client(lambda req: _json_response(200, {})) as client:
+            result = await engine_checks.check_marketplace(client, "https://api.example.com", manifest)
+        assert result.total_products == 2
+        assert result.conformant_count == 2
+
 
 # ---------------------------------------------------------------------------
 # 8. Per-product endpoint walk
@@ -1340,6 +1503,197 @@ class TestCheckProductEndpoint:
                 _valid_product("p9"),
             )
         assert result.status == "ERROR"
+
+    @pytest.mark.asyncio
+    async def test_post_method_free_product(self, make_client) -> None:
+        """Product with method=POST sends POST request with empty JSON body."""
+        seen_method: list[str] = []
+        seen_body: list[bytes] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen_method.append(req.method)
+            seen_body.append(req.content)
+            return _json_response(200)
+
+        async with make_client(handler) as client:
+            result = await engine_checks.check_product_endpoint(
+                client,
+                "https://api.example.com",
+                {"id": "post1", "name": "PostProduct", "endpoint": "/post-endpoint", "method": "POST"},
+            )
+        assert result.status == "PASS"
+        assert seen_method == ["POST"]
+        # Should send empty JSON object
+        assert json.loads(seen_body[0]) == {}
+
+    @pytest.mark.asyncio
+    async def test_post_method_paid_product_402(self, make_client) -> None:
+        """Paid product with method=POST sends POST and checks for 402."""
+        seen_method: list[str] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen_method.append(req.method)
+            return _json_response(402, headers={"payment-required": _b64({"network": "eip155:1"})})
+
+        async with make_client(handler) as client:
+            result = await engine_checks.check_product_endpoint(
+                client,
+                "https://api.example.com",
+                {
+                    "id": "post2", "name": "PostPaid", "endpoint": "/paid-post",
+                    "method": "POST",
+                    "x402": {"scheme": "exact", "network": "eip155:8453", "pay_to": "0xabc", "facilitator_url": "https://f.example"},
+                },
+            )
+        assert result.status == "PASS"
+        assert seen_method == ["POST"]
+        assert result.details["has_payment_header"] is True
+
+    @pytest.mark.asyncio
+    async def test_full_url_endpoint(self, make_client) -> None:
+        """When endpoint is a full URL, use it directly (don't prepend base_url)."""
+        seen_urls: list[str] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen_urls.append(str(req.url))
+            return _json_response(200)
+
+        async with make_client(handler) as client:
+            result = await engine_checks.check_product_endpoint(
+                client,
+                "https://api.example.com",
+                {"id": "full1", "name": "Full", "endpoint": "https://other.example.com/x402/scan"},
+            )
+        assert result.status == "PASS"
+        assert seen_urls == ["https://other.example.com/x402/scan"]
+
+
+# ---------------------------------------------------------------------------
+# 8b. Routes[] normalization (x402 v2 route catalog — e.g. Viridis)
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeRoutesToProducts:
+    """The x402 v2 ``routes[]`` catalog shape → internal product shape."""
+
+    def test_paid_route_gets_x402_block(self) -> None:
+        routes = [{
+            "agent": "regulatory-radar",
+            "tool": "scan_regulations",
+            "endpoint": "https://m.example.com/x402/regulatory-radar/scan_regulations",
+            "methods": ["GET", "POST"],
+            "paid_execution_method": "POST",
+            "price_minor": 25,
+            "x402_version": 2,
+            "v2_enabled": True,
+        }]
+        products = engine_checks._normalize_routes_to_products(routes)
+        assert len(products) == 1
+        p = products[0]
+        assert p["id"] == "regulatory-radar/scan_regulations"
+        assert p["method"] == "POST"
+        assert p["x402"] is not None, "paid route must be treated as paid, not free"
+        assert p["x402"]["price_minor"] == 25
+        assert p["_from_routes"] is True
+
+    def test_free_route_stays_free(self) -> None:
+        routes = [{
+            "agent": "a", "tool": "t",
+            "endpoint": "https://m.example.com/free",
+            "methods": ["GET"],
+            "price_minor": 0,
+        }]
+        products = engine_checks._normalize_routes_to_products(routes)
+        assert products[0]["x402"] is None
+        assert products[0]["method"] == "GET"
+
+    def test_input_schema_is_carried(self) -> None:
+        schema = {"type": "object", "required": ["jurisdiction"],
+                  "properties": {"jurisdiction": {"type": "string", "enum": ["US", "EU"]}}}
+        routes = [{
+            "agent": "a", "tool": "t", "endpoint": "https://m.example.com/x",
+            "paid_execution_method": "POST", "price_minor": 25,
+            "input_schema": schema,
+        }]
+        products = engine_checks._normalize_routes_to_products(routes)
+        assert products[0]["input_schema"] == schema
+
+    def test_method_alias_from_next_paid_route_shape(self) -> None:
+        # next_paid_routes entries use "method" instead of "paid_execution_method"
+        routes = [{"agent": "a", "tool": "t", "endpoint": "https://m.example.com/x",
+                   "method": "POST", "price_minor": 200}]
+        products = engine_checks._normalize_routes_to_products(routes)
+        assert products[0]["method"] == "POST"
+
+
+class TestBuildMinBody:
+    """Schema → minimal valid body, to get past input validation to the 402."""
+
+    def test_enum_picks_first(self) -> None:
+        schema = {"type": "object", "required": ["jurisdiction"],
+                  "properties": {"jurisdiction": {"type": "string", "enum": ["US", "EU"]}}}
+        assert engine_checks._build_min_body(schema) == {"jurisdiction": "US"}
+
+    def test_types_get_defaults(self) -> None:
+        schema = {"type": "object", "required": ["n", "f", "b", "arr", "s"],
+                  "properties": {
+                      "n": {"type": "integer"}, "f": {"type": "number"},
+                      "b": {"type": "boolean"}, "arr": {"type": "array"},
+                      "s": {"type": "string"}}}
+        body = engine_checks._build_min_body(schema)
+        assert body == {"n": 0, "f": 0, "b": False, "arr": [], "s": "x"}
+
+    def test_no_properties_returns_empty(self) -> None:
+        assert engine_checks._build_min_body({"type": "object"}) == {}
+        assert engine_checks._build_min_body({}) == {}
+
+    def test_falls_back_to_all_props_when_no_required(self) -> None:
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+        assert engine_checks._build_min_body(schema) == {"a": "x"}
+
+
+class TestPaidRoutePostProbe:
+    """A paid POST route that gates input before the 402 must be reported honestly."""
+
+    @pytest.mark.asyncio
+    async def test_post_body_built_from_schema(self, make_client) -> None:
+        seen: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["method"] = req.method
+            seen["body"] = json.loads(req.content or b"{}")
+            return _json_response(402, headers={"payment-required": _b64({"network": "eip155:8453"})})
+
+        product = {
+            "id": "r1", "name": "r1", "endpoint": "https://m.example.com/x",
+            "method": "POST", "x402": {"price_minor": 25},
+            "input_schema": {"type": "object", "required": ["jurisdiction"],
+                             "properties": {"jurisdiction": {"type": "string", "enum": ["US"]}}},
+        }
+        async with make_client(handler) as client:
+            result = await engine_checks.check_product_endpoint(client, "https://m.example.com", product)
+        assert seen["method"] == "POST"
+        assert seen["body"] == {"jurisdiction": "US"}
+        assert result.status == "PASS"
+
+    @pytest.mark.asyncio
+    async def test_400_input_validation_reported_not_free_fail(self, make_client) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            return _json_response(400, {"error_type": "input_validation_error",
+                                        "payment_required": False})
+
+        product = {
+            "id": "r2", "name": "r2", "endpoint": "https://m.example.com/x",
+            "method": "POST", "x402": {"price_minor": 25}, "input_schema": None,
+        }
+        async with make_client(handler) as client:
+            result = await engine_checks.check_product_endpoint(client, "https://m.example.com", product)
+        assert result.status == "FAIL"
+        assert result.details["input_validation_error"] is True
+        assert result.details["had_input_schema"] is False
+        # Must NOT be the misleading "free product should return 200" message.
+        assert "Free product" not in result.message
+        assert "before emitting the 402" in result.message.lower() or "before the 402" in result.message.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -1806,6 +2160,70 @@ class TestX402Auditor:
         assert len(per_product_bazaar) == 1, f"got bazaar checks: {[c.check_name for c in report.checks]}"
         assert per_product_bazaar[0].status == "PASS"
         assert "skipped" in per_product_bazaar[0].message
+
+    @pytest.mark.asyncio
+    async def test_marketplace_mode_with_routes(self, make_client) -> None:
+        """Marketplace mode iterates routes[] entries as product checks."""
+        manifest = {
+            "routes": [
+                {
+                    "agent": "regulatory-radar",
+                    "tool": "scan_regulations",
+                    "endpoint": "/x402/regulatory-radar/scan",
+                    "methods": ["GET", "POST"],
+                    "paid_execution_method": "POST",
+                },
+                {
+                    "agent": "ghg-ledger",
+                    "tool": "calculate_inventory",
+                    "endpoint": "/x402/ghg-ledger/calc",
+                    "methods": ["GET", "POST"],
+                    "paid_execution_method": "POST",
+                },
+            ],
+        }
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            url = str(req.url)
+            if "/.well-known/x402" in url:
+                return _payload_response(manifest)
+            return _json_response(200, {})
+
+        async with X402Auditor(transport=httpx.MockTransport(handler)) as auditor:
+            report = await auditor.run_full_audit(
+                "https://api.example.com", mode=CheckMode.MARKETPLACE,
+            )
+
+        # marketplace_products check should be present
+        mp = [c for c in report.checks if c.check_name == "marketplace_products"]
+        assert len(mp) == 1
+        assert mp[0].total_products == 2
+        assert mp[0].conformant_count == 2
+
+        # product_check entries for each route
+        product_checks = [c for c in report.checks if c.check_name == "product_check"]
+        assert len(product_checks) == 2
+        ids = {pc.product_id for pc in product_checks}
+        assert ids == {"regulatory-radar/scan_regulations", "ghg-ledger/calculate_inventory"}
+
+    @pytest.mark.asyncio
+    async def test_marketplace_mode_routes_empty(self, make_client) -> None:
+        """Empty routes[] array should not crash marketplace mode."""
+        manifest = {"routes": []}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if "/.well-known/x402" in str(req.url):
+                return _payload_response(manifest)
+            return _json_response(200, {})
+
+        async with X402Auditor(transport=httpx.MockTransport(handler)) as auditor:
+            report = await auditor.run_full_audit(
+                "https://api.example.com", mode=CheckMode.MARKETPLACE,
+            )
+
+        mp = [c for c in report.checks if c.check_name == "marketplace_products"]
+        assert len(mp) == 1
+        assert mp[0].total_products == 0
 
 
 # ---------------------------------------------------------------------------

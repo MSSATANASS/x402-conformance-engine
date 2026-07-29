@@ -11,11 +11,16 @@ from x402_conformance_suite.cli import (
     audit_command,
 )
 from x402_conformance_suite._engine import (
+    AcceptsCompletenessResult,
     AuditReport,
-    ManifestResult,
-    Caip2Result,
-    JsonResilienceResult,
     BazaarResult,
+    BotWallResult,
+    Caip2Result,
+    DiscoveryResourceResult,
+    JsonResilienceResult,
+    ManifestResult,
+    MarketplaceResult,
+    ProductResult,
 )
 from datetime import datetime, timezone
 
@@ -27,7 +32,16 @@ def make_report(
     caip2: str = "PASS",
     json_res: str = "PASS",
     bazaar: str = "PASS",
+    bot_wall: str = "PASS",
+    accepts: str = "PASS",
+    discovery: str = "PASS",
 ) -> AuditReport:
+    """Build a full standard-mode report — all seven checks.
+
+    The fixture mirrors what ``run_full_audit`` actually returns. It used to
+    stop at four, which is precisely why the CSV writer could silently drop
+    the other three without a single test noticing.
+    """
     return AuditReport(
         target_url=url,
         timestamp=datetime.now(timezone.utc),
@@ -37,7 +51,33 @@ def make_report(
             Caip2Result(status=caip2, message="ok"),
             JsonResilienceResult(status=json_res, message="ok"),
             BazaarResult(status=bazaar, message="ok"),
+            BotWallResult(status=bot_wall, message="ok"),
+            AcceptsCompletenessResult(status=accepts, message="ok"),
+            DiscoveryResourceResult(status=discovery, message="ok"),
         ],
+        summary="",
+    )
+
+
+def make_marketplace_report(url: str, products: int = 2) -> AuditReport:
+    """Standard checks plus catalog + repeated per-product results."""
+    checks = [
+        ManifestResult(status="PASS", message="ok"),
+        Caip2Result(status="PASS", message="ok"),
+        JsonResilienceResult(status="PASS", message="ok"),
+        BazaarResult(status="PASS", message="ok"),
+        BotWallResult(status="PASS", message="ok"),
+        AcceptsCompletenessResult(status="PASS", message="ok"),
+        DiscoveryResourceResult(status="PASS", message="ok"),
+        MarketplaceResult(status="PASS", message="ok"),
+    ]
+    for i in range(products):
+        checks.append(ProductResult(status="PASS", message=f"product {i}"))
+    return AuditReport(
+        target_url=url,
+        timestamp=datetime.now(timezone.utc),
+        overall_status="PASS",
+        checks=checks,
         summary="",
     )
 
@@ -77,6 +117,52 @@ class TestReportToRow:
         assert row["overall_status"] == "FAIL"
         assert row["manifest_discovery"] == "FAIL"
 
+    def test_carries_every_check_in_the_report(self):
+        """Regression: the row was a hardcoded allow-list of four names, so
+        v0.5.0's three new checks vanished from CSV output entirely."""
+        r = make_report("https://test.com")
+        row = report_to_row(r)
+        for name in (
+            "manifest_discovery",
+            "caip2_compliance",
+            "json_resilience",
+            "bazaar_compliance",
+            "bot_wall",
+            "accepts_completeness",
+            "discovery_resource_listing",
+        ):
+            assert name in row, f"{name} missing from CSV row"
+
+    def test_failing_check_is_visible_not_just_overall(self):
+        """The whole point of the CSV: overall=FAIL must be explainable by a
+        column. Previously a report could show FAIL with every visible column
+        PASS, because the failing check had no column."""
+        r = make_report("https://fail.com", status="FAIL", accepts="FAIL")
+        row = report_to_row(r)
+        assert row["overall_status"] == "FAIL"
+        assert row["accepts_completeness"] == "FAIL"
+        assert any(v == "FAIL" for k, v in row.items() if k != "overall_status")
+
+    def test_unknown_future_check_still_round_trips(self):
+        """Nothing is hardcoded: a check the CLI has never heard of appears."""
+        from x402_conformance_suite._engine.models import CheckResult
+
+        r = make_report("https://test.com")
+        r.checks.append(CheckResult(check_name="some_future_check", status="FAIL", message="x"))
+        row = report_to_row(r)
+        assert row["some_future_check"] == "FAIL"
+
+    def test_repeated_product_checks_do_not_overwrite(self):
+        r = make_marketplace_report("https://market.com", products=3)
+        row = report_to_row(r)
+        assert row["product_check"] == "PASS"
+        assert row["product_check_2"] == "PASS"
+        assert row["product_check_3"] == "PASS"
+
+    def test_timestamp_stays_last(self):
+        row = report_to_row(make_report("https://test.com"))
+        assert list(row.keys())[-1] == "timestamp"
+
 
 class TestWriteCsv:
     def test_writes_csv(self, tmp_path):
@@ -88,6 +174,32 @@ class TestWriteCsv:
         assert "https://a.com" in content
         assert "https://b.com" in content
         assert "overall_status" in content
+
+    def test_header_covers_all_seven_checks(self, tmp_path):
+        p = str(tmp_path / "out.csv")
+        write_csv([make_report("https://a.com")], p)
+        header = open(p).readline()
+        for name in ("bot_wall", "accepts_completeness", "discovery_resource_listing"):
+            assert name in header
+
+    def test_mixed_modes_do_not_raise_and_pad_missing_cells(self, tmp_path):
+        """Regression: fieldnames came from rows[0] only, so a later row with
+        extra columns (marketplace after standard) raised ValueError."""
+        import csv as _csv
+
+        reports = [
+            make_report("https://standard.com"),
+            make_marketplace_report("https://market.com", products=2),
+        ]
+        p = str(tmp_path / "mixed.csv")
+        write_csv(reports, p)  # must not raise
+
+        with open(p, newline="") as f:
+            rows = list(_csv.DictReader(f))
+        assert len(rows) == 2
+        assert rows[0]["marketplace_products"] == ""  # padded, not missing
+        assert rows[1]["marketplace_products"] == "PASS"
+        assert rows[1]["product_check_2"] == "PASS"
 
 
 class TestWriteJson:

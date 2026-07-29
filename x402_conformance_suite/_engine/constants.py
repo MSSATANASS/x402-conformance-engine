@@ -40,7 +40,7 @@ PAYMENT_HEADERS: Final[tuple[str, ...]] = (
 class CheckMode:
     """Audit mode constants — string enums for clarity. Use ``CheckMode.STANDARD`` etc.
 
-    ``standard``    — single-endpoint conformance audit (4 base checks).
+    ``standard``    — single-endpoint conformance audit (7 base checks).
     ``marketplace`` — multi-product catalog (adds marketplace + product walks).
     """
 

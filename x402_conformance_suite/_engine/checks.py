@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 import httpx
 
@@ -49,6 +49,27 @@ from x402_conformance_suite._engine.models import (
 # ---------------------------------------------------------------------------
 # Network helpers (private)
 # ---------------------------------------------------------------------------
+
+
+async def _get_or_reason(
+    client: httpx.AsyncClient, url: str
+) -> tuple[httpx.Response | None, str]:
+    """GET ``url``, returning ``(response, "")`` or ``(None, reason)``.
+
+    Same never-raise contract as ``_safe_get``, but the caller keeps the
+    timeout-vs-connect-vs-other distinction so its ERROR message can say
+    which one happened instead of a generic "network failure".
+    """
+    try:
+        return await client.get(url), ""
+    except httpx.TimeoutException:
+        return None, "request timed out"
+    except httpx.ConnectError as e:
+        return None, f"connection error: {e}"
+    except httpx.HTTPError as e:
+        return None, f"HTTP error: {e}"
+    except Exception as e:  # noqa: BLE001 — checks never raise
+        return None, f"unexpected error: {e}"
 
 
 async def _safe_get(client: httpx.AsyncClient, url: str) -> httpx.Response | None:
@@ -109,6 +130,133 @@ def _network_candidates(obj: dict[str, Any]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Route normalization (private)
+# ---------------------------------------------------------------------------
+
+
+def _build_min_body(schema: dict[str, Any]) -> dict[str, Any]:
+    """Build a minimal object that satisfies a JSON-schema ``input_schema``.
+
+    Best-effort: fills every ``required`` property (falling back to all
+    declared properties when ``required`` is absent) with a schema-valid
+    placeholder — the first ``enum`` value when present, otherwise a
+    type-appropriate default. This is only meant to get past an endpoint's
+    input-validation gate so the x402 402 challenge can be observed; it is not
+    a semantically meaningful payload.
+    """
+    if not isinstance(schema, dict):
+        return {}
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return {}
+    required = schema.get("required")
+    keys = required if isinstance(required, list) and required else list(props.keys())
+
+    body: dict[str, Any] = {}
+    for key in keys:
+        spec = props.get(key) if isinstance(props.get(key), dict) else {}
+        body[key] = _placeholder_for(spec)
+    return body
+
+
+def _placeholder_for(spec: dict[str, Any]) -> Any:
+    """Return a schema-valid placeholder value for a single property spec."""
+    if not isinstance(spec, dict):
+        return "x"
+    enum = spec.get("enum")
+    if isinstance(enum, list) and enum:
+        return enum[0]
+    default = spec.get("default")
+    if default is not None:
+        return default
+    stype = spec.get("type")
+    if isinstance(stype, list):
+        stype = next((t for t in stype if t != "null"), stype[0] if stype else "string")
+    if stype == "integer":
+        return spec.get("minimum", 0) or 0
+    if stype == "number":
+        return spec.get("minimum", 0) or 0
+    if stype == "boolean":
+        return False
+    if stype == "array":
+        return []
+    if stype == "object":
+        nested = spec.get("properties")
+        return _build_min_body(spec) if isinstance(nested, dict) else {}
+    return "x"
+
+
+def _normalize_routes_to_products(routes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert x402 v2 ``routes[]`` entries into the internal product shape.
+
+    Each route becomes a product dict with:
+        - id/name derived from ``agent`` + ``/`` + ``tool``
+        - endpoint from the route's ``endpoint`` field
+        - method from ``paid_execution_method`` (defaults to "POST" when
+          ``methods`` includes POST, otherwise "GET")
+        - x402 is always None (routes format does not carry x402 blocks)
+
+    This lets the marketplace walker iterate routes the same way it iterates
+    ``products[]`` entries, without changing the existing product validation
+    logic.
+    """
+    products: list[dict[str, Any]] = []
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        agent = str(route.get("agent", "") or "")
+        tool = str(route.get("tool", "") or "")
+        route_id = f"{agent}/{tool}" if agent and tool else (agent or tool or "unknown")
+        endpoint = str(route.get("endpoint", "") or "")
+        methods = route.get("methods")
+        paid_method = str(route.get("paid_execution_method", "") or route.get("method", "") or "")
+        if not paid_method:
+            if isinstance(methods, list) and "POST" in methods:
+                paid_method = "POST"
+            else:
+                paid_method = "GET"
+
+        # A route is "paid" when it advertises a price or an x402 v2 channel.
+        # We synthesize a truthy x402 block so downstream product validation
+        # treats it as paid (expects HTTP 402) instead of free (expects 200).
+        price_minor = route.get("price_minor")
+        try:
+            price_val = int(price_minor) if price_minor is not None else 0
+        except (TypeError, ValueError):
+            price_val = 0
+        is_paid = (
+            price_val > 0
+            or bool(route.get("v2_enabled"))
+            or route.get("x402_version") is not None
+        )
+        x402_block: Optional[dict[str, Any]] = None
+        if is_paid:
+            x402_block = {
+                "price_minor": price_val,
+                "amount_atomic_usdc": route.get("amount_atomic_usdc"),
+                "x402_version": route.get("x402_version"),
+            }
+
+        # Publish the Bazaar input schema (if any) so the paid POST probe can
+        # build a schema-valid body and actually reach the 402 challenge
+        # instead of tripping the endpoint's input validation.
+        input_schema = route.get("input_schema")
+        if not isinstance(input_schema, dict):
+            input_schema = None
+
+        products.append({
+            "id": route_id,
+            "name": route_id,
+            "endpoint": endpoint,
+            "method": paid_method,
+            "x402": x402_block,
+            "input_schema": input_schema,
+            "_from_routes": True,
+        })
+    return products
+
+
+# ---------------------------------------------------------------------------
 # Manifest discovery
 # ---------------------------------------------------------------------------
 
@@ -116,10 +264,11 @@ def _network_candidates(obj: dict[str, Any]) -> list[str]:
 async def check_manifest(
     client: httpx.AsyncClient, base_url: str
 ) -> ManifestResult:
-    """GET ``{base_url}/.well-known/x402``; require ``accepts`` or ``products``.
+    """GET ``{base_url}/.well-known/x402``; require ``accepts``, ``products``, or ``routes``.
 
-    PASS — JSON object with ``accepts`` OR non-empty ``products`` array.
-    FAIL — non-200, non-JSON, missing both keys, etc.
+    PASS — JSON object with ``accepts`` OR non-empty ``products`` array OR
+           non-empty ``routes`` array.
+    FAIL — non-200, non-JSON, missing all three keys, etc.
     ERROR — network/transport failure.
     """
     url = base_url.rstrip("/") + MANIFEST_PATH_SUFFIX
@@ -191,17 +340,21 @@ async def check_manifest(
     has_accepts = "accepts" in payload and isinstance(payload["accepts"], list)
     products = payload.get("products") if isinstance(payload.get("products"), list) else []
     has_products = len(products) > 0
+    routes = payload.get("routes") if isinstance(payload.get("routes"), list) else []
+    has_routes = len(routes) > 0
 
-    if has_accepts or has_products:
+    if has_accepts or has_products or has_routes:
         return ManifestResult(
             status="PASS",
-            message=msg.manifest_ok(has_accepts, len(products), url),
+            message=msg.manifest_ok(has_accepts, len(products), url, has_routes, len(routes)),
             details={
                 "url": url,
                 "status_code": status_code,
                 "has_accepts": has_accepts,
                 "has_products": has_products,
+                "has_routes": has_routes,
                 "product_count": len(products) if has_products else 0,
+                "route_count": len(routes) if has_routes else 0,
                 "headers": dict(response.headers),
             },
         )
@@ -214,6 +367,7 @@ async def check_manifest(
             "status_code": status_code,
             "has_accepts": False,
             "has_products": False,
+            "has_routes": False,
             "headers": dict(response.headers),
             "received_keys": sorted(list(payload.keys())),
         },
@@ -542,7 +696,7 @@ async def _get_402_body(
 async def check_marketplace(
     client: httpx.AsyncClient, base_url: str, manifest_payload: dict[str, Any]
 ) -> MarketplaceResult:
-    """Validate each product in ``manifest['products']`` conforms to x402.
+    """Validate each product in ``manifest['products']`` (and ``routes[]``) conforms to x402.
 
     Per product requirement (each x402 block):
         - scheme == "exact"
@@ -550,9 +704,21 @@ async def check_marketplace(
         - pay_to (or payTo) is set
         - facilitator_url is set
         - method == "GET" if specified
+
+    Routes are normalized into the product shape first (see
+    ``_normalize_routes_to_products``).  Route-derived products carry no
+    ``x402`` block, so the per-product x402 validation is skipped for them;
+    they are counted as conformant by default.
     """
-    products = manifest_payload.get("products", [])
-    if not isinstance(products, list) or not products:
+    products: list[dict[str, Any]] = []
+    raw_products = manifest_payload.get("products")
+    if isinstance(raw_products, list):
+        products.extend(raw_products)
+    raw_routes = manifest_payload.get("routes")
+    if isinstance(raw_routes, list):
+        products.extend(_normalize_routes_to_products(raw_routes))
+
+    if not products:
         return MarketplaceResult(
             status="FAIL",
             message=msg.marketplace_summary(0, 0),
@@ -581,9 +747,13 @@ async def check_marketplace(
         pid = str(product.get("id", f"product_{i}"))
         name = str(product.get("name", pid))
         x402_block = product.get("x402")
+        from_routes = bool(product.get("_from_routes"))
         errors: list[str] = []
 
-        if x402_block is None:
+        if from_routes:
+            # Route-derived products carry no x402 block — skip x402 validation.
+            pass
+        elif x402_block is None:
             errors.append("missing x402 block")
         elif isinstance(x402_block, dict):
             scheme = x402_block.get("scheme")
@@ -602,7 +772,7 @@ async def check_marketplace(
         else:
             errors.append("x402 block is not an object")
 
-        if product.get("method") and product["method"] != "GET":
+        if not from_routes and product.get("method") and product["method"] != "GET":
             errors.append(f"method should be GET, got {product['method']!r}")
 
         if not errors:
@@ -643,17 +813,24 @@ async def check_product_endpoint(
     base_url: str,
     product: dict[str, Any],
 ) -> ProductResult:
-    """GET ``{base_url}{product['endpoint']}`` and validate the response.
+    """Probe ``{base_url}{product['endpoint']}`` and validate the response.
 
     Free products (no x402 block) should return HTTP 200.
     Paid products (with x402 block) should return HTTP 402 with a
     Payment-Required header.
+
+    The HTTP method is read from ``product['method']`` (defaults to "GET").
+    POST requests send an empty JSON body ``{}`` with
+    ``Content-Type: application/json``.
     """
     pid = str(product.get("id", "unknown"))
     name = str(product.get("name", pid))
     endpoint = str(product.get("endpoint", "") or "")
     x402_block = product.get("x402")
     is_free = x402_block is None
+    http_method = str(product.get("method", "GET") or "GET").upper()
+    input_schema = product.get("input_schema")
+    post_body = _build_min_body(input_schema) if isinstance(input_schema, dict) else {}
 
     if not endpoint:
         return ProductResult(
@@ -664,10 +841,17 @@ async def check_product_endpoint(
             details={"error": "no endpoint defined"},
         )
 
-    full_url = base_url.rstrip("/") + endpoint
+    # If endpoint is already a full URL, use it directly; otherwise append to base.
+    if endpoint.startswith(("http://", "https://")):
+        full_url = endpoint
+    else:
+        full_url = base_url.rstrip("/") + endpoint
 
     try:
-        resp = await client.get(full_url)
+        if http_method == "POST":
+            resp = await client.post(full_url, json=post_body)
+        else:
+            resp = await client.get(full_url)
     except httpx.TimeoutException:
         return ProductResult(
             status="ERROR",
@@ -752,6 +936,42 @@ async def check_product_endpoint(
             details={"endpoint": endpoint, "status_code": status, "is_free": False},
         )
 
+    # HTTP 400 on a paid route almost always means the endpoint validates the
+    # request body against its Bazaar input schema BEFORE emitting the 402
+    # challenge. We could not construct a schema-valid body (schema absent or
+    # under-specified in the manifest), so we could not reach the paywall.
+    # This is a validator-surface limitation, not an endpoint defect — report
+    # it explicitly rather than as a misleading generic error.
+    if status == 400:
+        payload_snippet: Any = None
+        input_validation = False
+        try:
+            body_json = resp.json()
+            if isinstance(body_json, dict):
+                payload_snippet = body_json
+                input_validation = (
+                    body_json.get("error_type") == "input_validation_error"
+                    or body_json.get("payment_required") is False
+                )
+        except Exception:
+            payload_snippet = None
+        if input_validation:
+            return ProductResult(
+                status="FAIL",
+                message=msg.product_paid_needs_input(name, isinstance(input_schema, dict)),
+                product_id=pid,
+                endpoint_url=full_url,
+                details={
+                    "endpoint": endpoint,
+                    "status_code": status,
+                    "is_free": False,
+                    "input_validation_error": True,
+                    "had_input_schema": isinstance(input_schema, dict),
+                    "sent_body": post_body,
+                    "response": payload_snippet,
+                },
+            )
+
     return ProductResult(
         status="ERROR",
         message=msg.product_unexpected(name, status),
@@ -775,11 +995,11 @@ async def check_bot_wall(client: httpx.AsyncClient, target_url: str) -> BotWallR
            two or more challenge-body markers.
     ERROR — network/transport failure.
     """
-    response = await _safe_get(client, target_url)
+    response, why = await _get_or_reason(client, target_url)
     if response is None:
         return BotWallResult(
             status="ERROR",
-            message=f"Network failure probing {target_url} — bot-wall check could not run.",
+            message=msg.bot_wall_error(target_url, why),
             details={"status_code": None, "signals": [], "blocked": False},
         )
 
@@ -811,17 +1031,13 @@ async def check_bot_wall(client: httpx.AsyncClient, target_url: str) -> BotWallR
     if blocked:
         return BotWallResult(
             status="FAIL",
-            message=(
-                f"Bot-protection ({', '.join(signals)}) answered with HTTP {status}"
-                " — agent buyers are blocked before they ever see your paywall."
-                " Allowlist agent user-agents or disable challenge for API paths."
-            ),
+            message=msg.bot_wall_blocked(signals, status),
             details={"status_code": status, "signals": signals, "blocked": True},
         )
 
     return BotWallResult(
         status="PASS",
-        message=f"No bot-protection detected (HTTP {status}).",
+        message=msg.bot_wall_clear(status),
         details={"status_code": status, "signals": signals, "blocked": False},
     )
 
@@ -865,11 +1081,11 @@ async def check_accepts_completeness(
     FAIL — any missing/invalid field.
     ERROR — network failure, or 402 without a decodable PaymentRequired.
     """
-    response = await _safe_get(client, target_url)
+    response, why = await _get_or_reason(client, target_url)
     if response is None:
         return AcceptsCompletenessResult(
             status="ERROR",
-            message=f"Network failure probing {target_url} — accepts[] check could not run.",
+            message=msg.accepts_error(target_url, why),
             details={"status_code": None, "applicable": None, "entries_checked": 0, "findings": []},
         )
 
@@ -877,7 +1093,7 @@ async def check_accepts_completeness(
     if status != 402:
         return AcceptsCompletenessResult(
             status="PASS",
-            message=f"Endpoint returned HTTP {status}, not 402 — accepts[] check not applicable.",
+            message=msg.accepts_not_applicable(status),
             details={"status_code": status, "applicable": False},
         )
 
@@ -885,7 +1101,7 @@ async def check_accepts_completeness(
     if payload is None:
         return AcceptsCompletenessResult(
             status="ERROR",
-            message="402 but no decodable PaymentRequired (header or JSON body).",
+            message=msg.accepts_undecodable(),
             details={"status_code": 402, "applicable": True, "entries_checked": 0, "findings": []},
         )
 
@@ -893,40 +1109,35 @@ async def check_accepts_completeness(
 
     version = payload.get("x402Version")
     if version not in (1, 2):
-        findings.append(f"x402Version missing or unrecognized: {version!r}")
+        findings.append(msg.accepts_version_bad(version))
 
     accepts = payload.get("accepts")
     if not isinstance(accepts, list) or not accepts:
-        findings.append("accepts[] missing or empty")
+        findings.append(msg.accepts_list_missing())
         accepts = []
 
     for i, entry in enumerate(accepts):
         if not isinstance(entry, dict):
-            findings.append(f"accepts[{i}] is not an object")
+            findings.append(msg.accepts_entry_not_object(i))
             continue
         for field in ("scheme", "network", "resource"):
             if not entry.get(field):
-                findings.append(f"accepts[{i}].{field} missing")
+                findings.append(msg.accepts_field_missing(i, field))
         if not (entry.get("payTo") or entry.get("pay_to")):
-            findings.append(f"accepts[{i}].payTo missing")
+            findings.append(msg.accepts_field_missing(i, "payTo"))
         amount = entry.get("amount", entry.get("maxAmountRequired"))
         if amount is None:
-            findings.append(f"accepts[{i}].amount missing (need 'amount' or 'maxAmountRequired')")
+            findings.append(msg.accepts_amount_missing(i))
         elif isinstance(amount, str) and "." in amount:
-            findings.append(
-                f"accepts[{i}].amount looks like dollars, not atomic units:"
-                f" {amount!r} (off by 10^6)"
-            )
+            findings.append(msg.accepts_amount_dollars(i, amount))
         elif not (isinstance(amount, str) and amount.isdigit()):
-            findings.append(
-                f"accepts[{i}].amount must be a digit string of atomic units, got {amount!r}"
-            )
+            findings.append(msg.accepts_amount_not_digits(i, amount))
 
     resource = payload.get("resource")
     if isinstance(resource, dict) and resource.get("url"):
         url = str(resource["url"])
         if url.rstrip("/") != target_url.rstrip("/"):
-            findings.append(f"resource.url '{url}' does not match probed URL")
+            findings.append(msg.accepts_resource_mismatch(url, target_url))
 
     details = {
         "status_code": 402,
@@ -938,16 +1149,13 @@ async def check_accepts_completeness(
     if findings:
         return AcceptsCompletenessResult(
             status="FAIL",
-            message=f"accepts[] completeness: {len(findings)} problem(s): {findings[0]}",
+            message=msg.accepts_problems(len(findings), findings[0]),
             details=details,
         )
 
     return AcceptsCompletenessResult(
         status="PASS",
-        message=(
-            f"All {len(accepts)} accepts[] entries complete"
-            " (scheme, network, atomic amount, payTo, resource)."
-        ),
+        message=msg.accepts_ok(len(accepts)),
         details=details,
     )
 
@@ -969,11 +1177,11 @@ async def check_discovery_resource_listing(
     ERROR — network failure, or catalog unreachable/invalid while a resource
             is paid.
     """
-    response = await _safe_get(client, target_url)
+    response, why = await _get_or_reason(client, target_url)
     if response is None:
         return DiscoveryResourceResult(
             status="ERROR",
-            message=f"Network failure probing {target_url} — discovery check could not run.",
+            message=msg.discovery_error(target_url, why),
             details={"status_code": None, "applicable": None, "listed": None},
         )
 
@@ -981,7 +1189,7 @@ async def check_discovery_resource_listing(
     if status != 402:
         return DiscoveryResourceResult(
             status="PASS",
-            message=f"Endpoint returned HTTP {status}, not 402 — discovery check not applicable.",
+            message=msg.discovery_not_applicable(status),
             details={"status_code": status, "applicable": False},
         )
 
@@ -1003,7 +1211,7 @@ async def check_discovery_resource_listing(
     if not paid_url:
         return DiscoveryResourceResult(
             status="PASS",
-            message="402 payload declares no resource — nothing to verify in catalog.",
+            message=msg.discovery_no_resource(),
             details={"applicable": True, "listed": None, "note": "no resource declared in payload"},
         )
 
@@ -1028,10 +1236,7 @@ async def check_discovery_resource_listing(
     if manifest is None:
         return DiscoveryResourceResult(
             status="ERROR",
-            message=(
-                f"Resource {paid_url} is paid but {catalog_url} is unreachable or"
-                " not JSON — cannot verify listing."
-            ),
+            message=msg.discovery_catalog_unreachable(paid_url, catalog_url),
             details={"applicable": True, "listed": None, "resource": paid_url},
         )
 
@@ -1056,6 +1261,13 @@ async def check_discovery_resource_listing(
                 endpoint = str(entry["endpoint"])
                 candidates.add(endpoint.rstrip("/"))
                 candidates.add((origin + endpoint).rstrip("/"))
+    routes = manifest.get("routes")
+    if isinstance(routes, list):
+        for entry in routes:
+            if isinstance(entry, dict) and entry.get("endpoint"):
+                endpoint = str(entry["endpoint"])
+                candidates.add(endpoint.rstrip("/"))
+                candidates.add((origin + endpoint).rstrip("/"))
 
     paid_norm = paid_url.rstrip("/")
     paid_path = httpx.URL(paid_norm).path.rstrip("/") if "://" in paid_norm else paid_norm
@@ -1064,16 +1276,13 @@ async def check_discovery_resource_listing(
     if listed:
         return DiscoveryResourceResult(
             status="PASS",
-            message=f"Paid resource {paid_url} is listed in {MANIFEST_PATH_SUFFIX}.",
+            message=msg.discovery_listed(paid_url),
             details={"applicable": True, "listed": True, "resource": paid_url},
         )
 
     return DiscoveryResourceResult(
         status="FAIL",
-        message=(
-            f"Paid resource {paid_url} is not listed in {MANIFEST_PATH_SUFFIX}"
-            " — agents cannot discover it. Add it to resources[] (or products[])."
-        ),
+        message=msg.discovery_not_listed(paid_url),
         details={
             "applicable": True,
             "listed": False,

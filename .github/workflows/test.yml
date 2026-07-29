@@ -10,6 +10,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
@@ -17,5 +18,36 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -e ".[all]" pytest pytest-asyncio
-      - run: python -m pytest test_*.py -v
+      - run: pip install -e . pytest pytest-asyncio
+      # tests/ holds the engine suite; test_cli.py and test_mcp_server.py sit
+      # at the repo root and fall outside pytest's configured testpaths, so
+      # both locations are named explicitly. Running only `test_*.py` here
+      # silently skipped the entire engine suite.
+      - run: python -m pytest tests/ test_cli.py test_mcp_server.py -v
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      - run: python -m build
+      # Catches malformed metadata before it reaches PyPI, where a release
+      # cannot be replaced.
+      - run: python -m twine check dist/*
+      # The engine must be importable from the built wheel, not just from the
+      # source tree, and its public surface must actually export what the docs
+      # promise.
+      - run: pip install dist/*.whl
+      - run: |
+          python -c "
+          from x402_conformance_suite.conformance import (
+              X402Auditor, run_audit,
+              BotWallResult, AcceptsCompletenessResult, DiscoveryResourceResult,
+              check_bot_wall, check_accepts_completeness, check_discovery_resource_listing,
+          )
+          import x402_conformance_suite as pkg
+          print('version:', pkg.__version__)
+          "

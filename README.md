@@ -37,21 +37,30 @@ asyncio.run(main())
 
 ## What it checks
 
-Four core checks plus marketplace mode:
+Seven core checks plus marketplace mode:
 
-| Check               | Purpose                                                  |
-|---------------------|----------------------------------------------------------|
-| `manifest_discovery`| `GET /.well-known/x402` returns a valid JSON manifest    |
-| `caip2_compliance`  | A payment header carries a valid CAIP-2 network          |
-| `json_resilience`   | HTTP 402 body is a JSON object, not a primitive         |
-| `bazaar_compliance` | The 402 body has a valid `extensions.bazaar` block       |
+| Check                        | Purpose                                                                 |
+|------------------------------|-------------------------------------------------------------------------|
+| `manifest_discovery`         | `GET /.well-known/x402` returns a valid JSON manifest                    |
+| `caip2_compliance`           | A valid CAIP-2 network is advertised — including v2 `accepts[].network`  |
+| `json_resilience`            | HTTP 402 body is a JSON object, not a primitive                          |
+| `bazaar_compliance`          | The 402 body has a valid `extensions.bazaar` block                       |
+| `bot_wall`                   | No bot-protection challenge answers in place of the origin               |
+| `accepts_completeness`       | Every `accepts[]` entry is complete, with amounts in atomic units        |
+| `discovery_resource_listing` | The paid resource is listed in the origin's catalog so agents find it    |
 
-For multi-product catalogs, use `mode="marketplace"` (see [API.md](docs/API.md)).
+A check that does not apply — a bazaar block on an endpoint that never returns
+402, say — reports PASS with `applicable: false` rather than punishing the
+operator for something the spec does not require.
+
+For multi-product catalogs, use `mode="marketplace"`: every product in the
+manifest gets its own endpoint audit and bazaar check (see
+[API.md](docs/API.md)).
 
 ## Extended tools (separate repo)
 
 Dashboard, API server, Stripe monetization, and proxy middleware:
-[MSSATANASS/x402-conformance-suite-tools](https://github.com/MSSATANASS/x402-conformance-suite-tools)
+[MSSATANASS/x402-validator-tools](https://github.com/MSSATANASS/x402-validator-tools)
 
 ## Documentation
 

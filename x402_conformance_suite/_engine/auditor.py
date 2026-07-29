@@ -34,6 +34,7 @@ import httpx
 from x402_conformance_suite._engine.checks import (
     _b64_to_obj,
     _network_candidates,
+    _normalize_routes_to_products,
     check_accepts_completeness,
     check_bazaar,
     check_bazaar_for_url,
@@ -288,8 +289,15 @@ class X402Auditor:
             await check_marketplace(self._client, target_url, manifest_payload)
         )
 
-        products = manifest_payload.get("products", [])
-        if not isinstance(products, list):
+        products: list[dict[str, Any]] = []
+        raw_products = manifest_payload.get("products")
+        if isinstance(raw_products, list):
+            products.extend(raw_products)
+        raw_routes = manifest_payload.get("routes")
+        if isinstance(raw_routes, list):
+            products.extend(_normalize_routes_to_products(raw_routes))
+
+        if not products:
             return
 
         product_networks: list[str] = []
@@ -311,7 +319,10 @@ class X402Auditor:
             if pr.status == "PASS" and product.get("x402"):
                 endpoint = str(product.get("endpoint", "") or "")
                 if endpoint:
-                    full = target_url.rstrip("/") + endpoint + "/"
+                    if endpoint.startswith(("http://", "https://")):
+                        full = endpoint.rstrip("/") + "/"
+                    else:
+                        full = target_url.rstrip("/") + endpoint + "/"
                     body = await self._fetch_402_body(full)
                     bz = check_bazaar(body)
                     bz.check_name = f"bazaar_{product.get('id', 'unknown')}"

@@ -50,30 +50,52 @@ def read_urls_from_file(path: str) -> list[str]:
 
 
 def report_to_row(report: AuditReport) -> dict[str, str]:
-    """Flatten a single report to a CSV-friendly row."""
-    checks = {c.check_name: c.status for c in report.checks}
+    """Flatten a single report to a CSV-friendly row.
+
+    Every check the report carries becomes its own column, in the order the
+    auditor ran them. Nothing is hardcoded: a report with checks the CLI has
+    never heard of still round-trips to CSV intact.
+
+    Marketplace mode emits repeated ``product_check`` / per-product bazaar
+    results; those are suffixed (``product_check``, ``product_check_2``, ...)
+    so no column silently overwrites another.
+    """
     row: dict[str, str] = {
         "url": report.target_url,
         "overall_status": report.overall_status,
-        "manifest_discovery": checks.get("manifest_discovery", "ERROR"),
-        "caip2_compliance": checks.get("caip2_compliance", "ERROR"),
-        "json_resilience": checks.get("json_resilience", "ERROR"),
-        "bazaar_compliance": checks.get("bazaar_compliance", "PASS"),
-        "timestamp": report.timestamp.isoformat(),
     }
-    if "marketplace_products" in checks:
-        row["marketplace_products"] = checks["marketplace_products"]
+    seen: Counter = Counter()
+    for check in report.checks:
+        name = check.check_name
+        seen[name] += 1
+        column = name if seen[name] == 1 else f"{name}_{seen[name]}"
+        row[column] = check.status
+    row["timestamp"] = report.timestamp.isoformat()
     return row
 
 
 def write_csv(results: list[AuditReport], path: str) -> None:
-    """Write results to a CSV file with one row per endpoint."""
+    """Write results to a CSV file with one row per endpoint.
+
+    The header is the union of every row's columns (endpoints audited in
+    different modes, or with different product counts, produce different
+    check sets). Missing cells are written empty rather than raising.
+    """
     rows = [report_to_row(r) for r in results]
     if not rows:
         return
-    fieldnames = list(rows[0].keys())
+
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    # Keep 'timestamp' last regardless of which row introduced it.
+    if "timestamp" in fieldnames:
+        fieldnames.append(fieldnames.pop(fieldnames.index("timestamp")))
+
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, restval="")
         writer.writeheader()
         writer.writerows(rows)
 

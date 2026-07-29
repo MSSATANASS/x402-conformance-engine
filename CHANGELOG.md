@@ -4,6 +4,69 @@ All notable changes to x402-conformance-suite are documented here. Format follow
 [Keep a Changelog](https://keepachangelog.com). This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.2] - 2026-07-29
+
+### Fixed
+
+- **Marketplace mode mis-graded x402 v2 `routes[]` catalogs.** Manifests that
+  advertise a route catalog via a top-level `routes[]` array (x402 v2, e.g.
+  the Viridis Conservation gateway) were walked, but every route was treated
+  as a *free* product — the walker expected HTTP 200 and probed with GET.
+  Paid routes (those carrying `price_minor` / `x402_version` / `v2_enabled`)
+  are now recognized as paid, probed with their declared
+  `paid_execution_method` (POST), and expected to return 402.
+
+- **Paid POST routes that gate input before the paywall now report honestly.**
+  Endpoints that validate the request body against their Bazaar `input_schema`
+  *before* emitting the 402 challenge returned HTTP 400 to an empty-body probe.
+  The engine now builds a schema-valid minimal body from the route's advertised
+  `input_schema` (first `enum` value / type-appropriate default) to reach the
+  challenge. When no `input_schema` is published, the route is reported with a
+  clear, operator-actionable message explaining that the validator cannot
+  construct a valid body to reach the paywall — instead of the misleading
+  "free product should return 200" failure.
+
+### Added
+
+- `_build_min_body()` / `_placeholder_for()` helpers for JSON-schema-driven
+  request synthesis, and `product_paid_needs_input()` message. 10 new tests
+  covering routes[] normalization, body synthesis, and the 400 input-gate path
+  (226 tests total).
+
+## [0.5.1] - 2026-07-28
+
+### Fixed
+
+- **CSV writer silently dropped three v0.5.0 checks.** `report_to_row()`
+  hardcoded the old four check names; `bot_wall`,
+  `accepts_completeness`, `discovery_resource_listing` never appeared in
+  the output. A report could show `overall_status=FAIL` with four `PASS`
+  columns and no clue why. `write_csv` also froze the header from row 0,
+  so fixing `report_to_row` alone would crash with `ValueError` on the
+  second row. Now both are fully dynamic: every check in the report
+  becomes a column, repeated checks get `_N` suffixes, and the header is
+  the union of all row keys.
+
+- **New result types were unimportable.** `BotWallResult`,
+  `AcceptsCompletenessResult`, `DiscoveryResourceResult` were missing from
+  `_engine/__init__.py` and `conformance.py`. Both now export them plus
+  the three check functions (`check_bot_wall`, `check_accepts_completeness`,
+  `check_discovery_resource_listing`) so library consumers can pattern-match
+  and type-annotate against them. Top-level `__init__.py` gained
+  `__version__` from package metadata.
+
+- **Three checks bypassed `messages.py`, violating the project rule.** ~25
+  inline f-strings migrated to `messages.py` with proper sections:
+  `=== Bot wall ===`, `=== accepts[] completeness ===`, `=== Discovery
+  resource listing ===`. Network error granularity (timeout vs connect
+  vs other) preserved in the new checks, matching the original four.
+
+- **CI blind spot.** The workflow ran `pytest test_*.py` — silently
+  skipping the entire `tests/` engine suite. Fixed to run
+  `tests/ test_cli.py test_mcp_server.py` explicitly. Added a `package`
+  job that builds, validates with `twine check`, installs the wheel in a
+  clean venv, and verifies the public surface exports all 26 public names.
+
 ## [0.5.0] - 2026-07-27
 
 ### Added

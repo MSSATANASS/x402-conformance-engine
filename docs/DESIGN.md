@@ -30,10 +30,12 @@ A conformance engine that:
 
 ```
 x402_conformance_suite/_engine/
-├── __init__.py      ← public re-exports only (4 lines)
+├── __init__.py      ← public re-exports only
 ├── auditor.py       ← X402Auditor + run_audit — orchestration
 ├── checks.py        ← check_manifest, check_caip2, check_json_resilience,
-│                      check_bazaar, check_marketplace, check_product_endpoint
+│                      check_bazaar, check_bot_wall, check_accepts_completeness,
+│                      check_discovery_resource_listing, check_marketplace,
+│                      check_product_endpoint
 ├── constants.py     ← regex patterns, header names, mode labels
 ├── models.py        ← Pydantic result types (one class per check)
 └── messages.py      ← human-readable, actionable error/warning strings
@@ -147,7 +149,17 @@ MCP server) so operators can vendor it as a single dependency.
 
 - **v0.1.0**: Single-endpoint only, four checks.
 - **v0.2.0**: Marketplace mode + cleaner error messages.
-- **v0.3.0** (current): Modular package, 100% coverage, full docstrings.
+- **v0.3.0**: Modular package, 100% coverage, full docstrings.
+- **v0.4.1**: CAIP-2 read from v2 `accepts[].network`, plus manifest and
+  product fallbacks — a free discovery root no longer masks the networks a
+  merchant actually enforces.
+- **v0.5.0**: Standard audit grows to seven checks (`bot_wall`,
+  `accepts_completeness`, `discovery_resource_listing`).
+- **v0.5.1** (current): Consumer-side repair of v0.5.0. The CSV writer had a
+  hardcoded four-column allow-list that silently dropped the new checks; the
+  new result types were never exported; and the three new checks inlined their
+  messages instead of using `messages.py`, violating the rule stated above.
+  All three are fixed, with regression tests that fail against the old code.
 
 Future: when settlement verification becomes cheap, add a `check_settlement`
 function without touching existing checks.

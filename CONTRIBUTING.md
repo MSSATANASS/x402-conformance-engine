@@ -67,7 +67,7 @@ def check_<name>(client, ...) -> SomeResult:
 
 - **Never** write `"check failed"`. Write the operator-actionable equivalent:
   - `"Payment-Required header missing. Expected: 'X-Payment-Required: '. Found: none."`
-  - `"Bazaar extension not implemented (optional). To add: include 'extensions.bazaar' in HTTP 402 response body with fields: method, serviceName, tags."`
+  - `"Bazaar extension malformed. Expected: extensions.bazaar.info.input.type, info.input.method, info.output.type. Found: missing info."`
 - Each FAIL must name the offending field.
 - Each CRITICAL_FAIL must explain downstream impact (e.g. "this crashes the reference verifier").
 - Each ERROR must describe what the operator should check (URL, network, etc.).
